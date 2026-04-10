@@ -1,0 +1,29 @@
+{
+  "development": {
+    "username": "root",
+    "password": "password",
+    "database": "uniflow",
+    "host": "localhost",
+    "port": 3306,
+    "dialect": "mysql",
+    "logging": true
+  },
+  "test": {
+    "username": "root",
+    "password": "",
+    "database": "uniflow_test",
+    "host": "localhost",
+    "port": 3306,
+    "dialect": "mysql",
+    "logging": false
+  },
+  "production": {
+    "username": "root",
+    "password": "",
+    "database": "uniflow",
+    "host": "localhost",
+    "port": 3306,
+    "dialect": "mysql",
+    "logging": false
+  }
+}
