@@ -6,6 +6,7 @@ import { WeeklySchedule } from './WeeklySchedule'
 import { Course } from './Course'
 import { MoodleConnection } from './MoodleConnection'
 import { Event } from './Event'
+import { DevicePushToken } from './DevicePushToken'
 import CourseNote from './CourseNote'
 import CourseFile from './CourseFile'
 
@@ -38,5 +39,8 @@ MoodleConnection.belongsTo(User, { foreignKey: 'userId', as: 'user' });
 User.hasMany(Event, { foreignKey: 'userId', as: 'events' });
 Event.belongsTo(User, { foreignKey: 'userId', as: 'user' });
 
+User.hasMany(DevicePushToken, { foreignKey: 'userId', as: 'devicePushTokens' });
+DevicePushToken.belongsTo(User, { foreignKey: 'userId', as: 'user' });
+
 // Export all models
-export { User, Profile, Task, WeeklySchedule, Course, MoodleConnection, Event }
+export { User, Profile, Task, WeeklySchedule, Course, MoodleConnection, Event, DevicePushToken }

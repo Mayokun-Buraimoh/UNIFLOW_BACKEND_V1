@@ -9,6 +9,7 @@ import profileRoutes from './routes/profile';
 import scheduleRoutes from './routes/schedule';
 import courseRoutes from './routes/course';
 import eventRoutes from './routes/event';
+import pushTokenRoutes from './routes/pushToken';
 import './models'; // Import models to establish associations
 
 const app = express();
@@ -27,6 +28,7 @@ app.use('/api/tasks', taskRoutes);
 app.use('/api/schedule', scheduleRoutes);
 app.use('/api/courses', courseRoutes);
 app.use('/api/events', eventRoutes);
+app.use('/api/push-tokens', pushTokenRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {

@@ -1,5 +1,9 @@
 import { Request, Response } from 'express';
 import { Event } from '../models/Event';
+import {
+  cancelEventReminderJob,
+  scheduleEventReminderForEvent,
+} from '../services/eventReminderScheduler';
 
 // Get all events for user
 export const getUserEvents = async (req: Request, res: Response) => {
@@ -62,6 +66,8 @@ export const createEvent = async (req: Request, res: Response) => {
       priority,
     });
 
+    void scheduleEventReminderForEvent(event);
+
     res.status(201).json(event);
   } catch (error: any) {
     console.error('Create event error:', error);
@@ -90,6 +96,8 @@ export const updateEvent = async (req: Request, res: Response) => {
 
     await event.save();
 
+    void scheduleEventReminderForEvent(event);
+
     res.json(event);
   } catch (error: any) {
     console.error('Update event error:', error);
@@ -109,6 +117,7 @@ export const deleteEvent = async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'Event not found' });
     }
 
+    await cancelEventReminderJob(eventId);
     await event.destroy();
 
     res.json({ message: 'Event deleted successfully' });
