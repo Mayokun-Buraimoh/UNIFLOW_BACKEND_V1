@@ -11,6 +11,17 @@ export function getRedisConnection(): Redis | null {
     return null;
   }
 
+  // Make event reminders opt-in: avoid implicit localhost Redis in dev/prod
+  // when no Redis variables are configured.
+  const hasExplicitRedisConfig = Boolean(
+    process.env.REDIS_URL ||
+    process.env.REDIS_HOST ||
+    process.env.REDIS_PORT
+  );
+  if (!hasExplicitRedisConfig) {
+    return null;
+  }
+
   if (!parent) {
     const url = process.env.REDIS_URL;
     if (url) {

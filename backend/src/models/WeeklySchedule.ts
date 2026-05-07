@@ -24,6 +24,8 @@ WeeklySchedule.init(
         model: 'users',
         key: 'id',
       },
+      onDelete: 'CASCADE',
+      onUpdate: 'CASCADE',
     },
     data: {
       // Store the full grid as JSON { Mon: [...], ... }

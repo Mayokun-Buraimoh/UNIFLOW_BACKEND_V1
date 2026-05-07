@@ -17,6 +17,9 @@ Profile.belongsTo(User, { foreignKey: 'userId', as: 'user' });
 User.hasMany(Task, { foreignKey: 'userId', as: 'tasks' });
 Task.belongsTo(User, { foreignKey: 'userId', as: 'user' });
 
+User.hasOne(WeeklySchedule, { foreignKey: 'userId', as: 'weeklySchedule', onDelete: 'CASCADE', hooks: true });
+WeeklySchedule.belongsTo(User, { foreignKey: 'userId', as: 'user' });
+
 User.hasMany(Course, { foreignKey: 'userId', as: 'courses' });
 Course.belongsTo(User, { foreignKey: 'userId', as: 'user' });
 

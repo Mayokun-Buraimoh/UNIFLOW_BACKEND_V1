@@ -117,7 +117,11 @@ export const deleteEvent = async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'Event not found' });
     }
 
-    await cancelEventReminderJob(eventId);
+    // Reminder cleanup should never block deletion if Redis is slow/unavailable.
+    await Promise.race([
+      cancelEventReminderJob(eventId),
+      new Promise<void>((resolve) => setTimeout(resolve, 1500)),
+    ]).catch(() => undefined);
     await event.destroy();
 
     res.json({ message: 'Event deleted successfully' });
