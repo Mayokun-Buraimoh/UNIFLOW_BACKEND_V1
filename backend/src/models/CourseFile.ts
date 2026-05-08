@@ -11,11 +11,13 @@ interface CourseFileAttributes {
   mimeType: string;
   size: number;
   storagePath: string; // relative or absolute path where file is stored
+  cloudinaryUrl: string | null;
+  cloudinaryPublicId: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
 
-interface CourseFileCreationAttributes extends Optional<CourseFileAttributes, 'id' | 'createdAt' | 'updatedAt'> {}
+interface CourseFileCreationAttributes extends Optional<CourseFileAttributes, 'id' | 'createdAt' | 'updatedAt' | 'cloudinaryUrl' | 'cloudinaryPublicId'> {}
 
 export class 
 CourseFile extends Model<CourseFileAttributes, CourseFileCreationAttributes> implements CourseFileAttributes {
@@ -26,6 +28,8 @@ CourseFile extends Model<CourseFileAttributes, CourseFileCreationAttributes> imp
   public mimeType!: string;
   public size!: number;
   public storagePath!: string;
+  public cloudinaryUrl!: string | null;
+  public cloudinaryPublicId!: string | null;
   public readonly createdAt!: Date;
   public readonly updatedAt!: Date;
 }
@@ -65,6 +69,14 @@ CourseFile.init(
     storagePath: {
       type: DataTypes.STRING,
       allowNull: false,
+    },
+    cloudinaryUrl: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+    },
+    cloudinaryPublicId: {
+      type: DataTypes.STRING(512),
+      allowNull: true,
     },
     createdAt: {
       type: DataTypes.DATE,

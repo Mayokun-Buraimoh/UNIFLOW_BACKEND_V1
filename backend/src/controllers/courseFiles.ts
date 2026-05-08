@@ -4,8 +4,14 @@ import fs from 'fs';
 import multer from 'multer';
 import libre from 'libreoffice-convert';
 import { promisify } from 'util';
+import { randomUUID } from 'crypto';
 import CourseFile from '../models/CourseFile';
 import { Course } from '../models/Course';
+import {
+  destroyCourseFileOnCloudinary,
+  isCloudinaryConfigured,
+  uploadCoursePdfToCloudinary,
+} from '../utils/courseFileCloudinary';
 
 // Storage setup: store files under ./uploads/courses/<courseId>/
 const uploadsRoot = path.resolve(process.cwd(), 'uploads', 'courses');
@@ -95,14 +101,40 @@ export const uploadFile = async (req: Request, res: Response) => {
     }
 
     const storagePath = path.relative(process.cwd(), finalPath);
+    const fileId = randomUUID();
+
+    let cloudinaryUrl: string | null = null;
+    let cloudinaryPublicId: string | null = null;
+
+    if (isCloudinaryConfigured()) {
+      try {
+        const up = await uploadCoursePdfToCloudinary({
+          localPath: finalPath,
+          courseId,
+          fileId,
+        });
+        cloudinaryUrl = up.secureUrl;
+        cloudinaryPublicId = up.publicId;
+        try {
+          fs.unlinkSync(finalPath);
+        } catch (unlinkErr) {
+          console.warn('Could not remove local file after Cloudinary upload:', unlinkErr);
+        }
+      } catch (cloudErr) {
+        console.error('Cloudinary upload failed; keeping local file:', cloudErr);
+      }
+    }
 
     const record = await CourseFile.create({
+      id: fileId,
       courseId,
       userId,
       originalName: finalOriginalName,
       mimeType: finalMime,
       size: finalSize,
       storagePath,
+      cloudinaryUrl,
+      cloudinaryPublicId,
     });
 
     res.status(201).json(record);
@@ -143,6 +175,10 @@ export const downloadFile = async (req: Request, res: Response) => {
     const fileRecord = await CourseFile.findOne({ where: { id: fileId, courseId, userId } });
     if (!fileRecord) return res.status(404).json({ error: 'File not found' });
 
+    if (fileRecord.cloudinaryUrl) {
+      return res.redirect(302, fileRecord.cloudinaryUrl);
+    }
+
     const absolutePath = path.resolve(process.cwd(), fileRecord.storagePath);
     if (!fs.existsSync(absolutePath)) return res.status(404).json({ error: 'File not found on disk' });
     const forceDownload = req.query.download === '1' || req.query.download === 'true';
@@ -154,6 +190,34 @@ export const downloadFile = async (req: Request, res: Response) => {
     res.sendFile(absolutePath);
   } catch (error) {
     console.error('Download file error:', error);
+    res.status(500).json({ error: 'Failed to download file' });
+  }
+};
+
+// GET /api/internal/files/:fileId/pdf
+// API key auth via x-internal-api-key header.
+export const downloadFileInternal = async (req: Request, res: Response) => {
+  try {
+    const expectedKey = (process.env.INTERNAL_API_KEY || '').trim();
+    const providedKey = String(req.headers['x-internal-api-key'] || '').trim();
+    if (!expectedKey || providedKey !== expectedKey) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const fileId = req.params.fileId;
+    const fileRecord = await CourseFile.findOne({ where: { id: fileId } });
+    if (!fileRecord) return res.status(404).json({ error: 'File not found' });
+
+    // For AI ingestion, always stream bytes from backend when available on disk.
+    // Do not redirect to Cloudinary here; this endpoint is for backend-to-backend access.
+    const absolutePath = path.resolve(process.cwd(), fileRecord.storagePath);
+    if (!fs.existsSync(absolutePath)) return res.status(404).json({ error: 'File not found on disk' });
+
+    res.setHeader('Content-Type', fileRecord.mimeType || 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(fileRecord.originalName)}"`);
+    res.sendFile(absolutePath);
+  } catch (error) {
+    console.error('Internal download file error:', error);
     res.status(500).json({ error: 'Failed to download file' });
   }
 };
@@ -170,6 +234,10 @@ export const deleteFile = async (req: Request, res: Response) => {
 
     const fileRecord = await CourseFile.findOne({ where: { id: fileId, courseId, userId } });
     if (!fileRecord) return res.status(404).json({ error: 'File not found' });
+
+    if (fileRecord.cloudinaryPublicId) {
+      await destroyCourseFileOnCloudinary(fileRecord.cloudinaryPublicId);
+    }
 
     const absolutePath = path.resolve(process.cwd(), fileRecord.storagePath);
     try {
@@ -192,5 +260,6 @@ export default {
   uploadFile,
   listFiles,
   downloadFile,
+  downloadFileInternal,
   deleteFile,
 };
