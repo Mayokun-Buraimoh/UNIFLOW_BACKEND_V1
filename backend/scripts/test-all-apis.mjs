@@ -20,13 +20,16 @@ function record(name, method, path, status, ok, note = '') {
   console.log(`${icon} [${status}] ${method} ${path}${note ? ` — ${note}` : ''}`);
 }
 
-async function http(method, path, { headers = {}, body, json = true } = {}) {
+async function http(method, path, { headers = {}, body, json = true, redirect } = {}) {
   const url = `${BASE}${path.startsWith('/') ? path : `/${path}`}`;
   const h = { ...headers };
   if (body !== undefined && json && typeof body === 'object' && !(body instanceof FormData)) {
     h['Content-Type'] = 'application/json';
   }
   const init = { method, headers: h };
+  if (redirect !== undefined) {
+    init.redirect = redirect;
+  }
   if (body !== undefined) {
     init.body = body instanceof FormData ? body : JSON.stringify(body);
   }
@@ -55,6 +58,18 @@ async function main() {
     const { res, data } = await http('GET', '/health');
     expect(res, 200, 'health', 'GET', '/health');
     if (!data?.status) console.warn('  (unexpected body)', data);
+  }
+
+  {
+    const { res } = await http('GET', '/auth/apple/redirect');
+    expect(res, 200, 'auth apple redirect placeholder', 'GET', '/auth/apple/redirect');
+  }
+
+  {
+    const { res } = await http('POST', '/auth/apple', {
+      body: { identityToken: 'invalid.jwt.token' },
+    });
+    expect(res, 401, 'auth apple rejects bad token', 'POST', '/auth/apple');
   }
 
   {

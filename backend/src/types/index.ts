@@ -5,6 +5,7 @@ export interface IUser {
   email: string
   passwordHash?: string
   googleId?: string
+  appleId?: string
   name?: string
   avatar?: string
   preferences?: Record<string, unknown>
@@ -16,6 +17,7 @@ export interface IUserCreationAttributes {
   email: string
   passwordHash?: string
   googleId?: string
+  appleId?: string
   name?: string
   avatar?: string
   preferences?: Record<string, unknown>

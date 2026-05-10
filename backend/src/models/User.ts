@@ -6,6 +6,7 @@ interface UserAttributes {
   email: string;
   passwordHash?: string;
   googleId?: string;
+  appleId?: string;
   name?: string;
   avatar?: string;
   preferences?: any;
@@ -20,6 +21,7 @@ export class User extends Model<UserAttributes, UserCreationAttributes> implemen
   public email!: string;
   public passwordHash?: string;
   public googleId?: string;
+  public appleId?: string;
   public name?: string;
   public avatar?: string;
   public preferences?: any;
@@ -48,6 +50,11 @@ User.init(
       type: DataTypes.STRING,
       allowNull: true,
       // Removed unique constraint to allow multiple Google IDs for same email
+    },
+    appleId: {
+      type: DataTypes.STRING,
+      allowNull: true,
+      unique: true,
     },
     name: {
       type: DataTypes.STRING,

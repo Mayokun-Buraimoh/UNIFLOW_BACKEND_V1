@@ -16,6 +16,9 @@ import './models'; // Import models to establish associations
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// So req.protocol / host respect X-Forwarded-* on Render and similar proxies
+app.set('trust proxy', 1);
+
 // Middleware
 app.use(cors());
 app.use(express.json());
