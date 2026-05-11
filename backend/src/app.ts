@@ -75,9 +75,13 @@ async function startServer() {
     await sequelize.authenticate();
     console.log('Database connection has been established successfully.');
     
-    // Sync database (create tables if they don't exist)
-    await sequelize.sync({ alter: true });
-    console.log('Database synchronized successfully.');
+    // Create missing tables only. Avoid `alter: true` by default — it can fail on shared DBs
+    // (e.g. Sequelize tries to drop FK constraints that were renamed or never existed).
+    // To force schema-alter sync: SEQUELIZE_SYNC_ALTER=true npm run dev
+    const syncAlter =
+      process.env.SEQUELIZE_SYNC_ALTER === 'true' || process.env.SEQUELIZE_SYNC_ALTER === '1';
+    await sequelize.sync({ alter: syncAlter });
+    console.log(`Database synchronized successfully (alter=${syncAlter}).`);
     
     app.listen(PORT, () => {
       console.log(`UniFlow Backend server is running on port ${PORT}`);

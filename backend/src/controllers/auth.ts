@@ -8,20 +8,67 @@ import { OAuth2Client } from 'google-auth-library';
 import { verifyAppleIdentityToken } from '../utils/verifyAppleIdentityToken';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-this-in-production';
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
-const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
+/** Trimmed — trailing newline/spaces in `.env` cause Google token endpoint `unauthorized_client`. */
+const GOOGLE_CLIENT_ID = (process.env.GOOGLE_CLIENT_ID || '').trim();
+const GOOGLE_CLIENT_SECRET = (process.env.GOOGLE_CLIENT_SECRET || '').trim();
+/** Native iOS / Capacitor OAuth client; id_token `aud` may be this or the web client when using serverClientId. */
+const GOOGLE_IOS_CLIENT_ID = (process.env.GOOGLE_IOS_CLIENT_ID || '').trim();
 /** Optional override; otherwise redirect_uri is derived from the incoming request (local + hosted). */
-const GOOGLE_CALLBACK_URL = process.env.GOOGLE_CALLBACK_URL || '';
-const FRONTEND_GOOGLE_REDIRECT_URI = process.env.FRONTEND_GOOGLE_REDIRECT_URI || 'http://localhost:5173/auth/google/callback';
+const GOOGLE_CALLBACK_URL = (process.env.GOOGLE_CALLBACK_URL || '').trim();
+/** Public SPA origin (no path); used if FRONTEND_GOOGLE_REDIRECT_URI is unset (e.g. on Render). */
+const FRONTEND_URL = (process.env.FRONTEND_URL || '').trim().replace(/\/$/, '');
+const FRONTEND_GOOGLE_REDIRECT_URI = (
+  (process.env.FRONTEND_GOOGLE_REDIRECT_URI || '').trim() ||
+  (FRONTEND_URL ? `${FRONTEND_URL}/auth/google/callback` : '') ||
+  'http://localhost:5173/auth/google/callback'
+).trim();
+
+interface GoogleOAuthStatePayload {
+  origin?: string;
+  timestamp?: number;
+  /** Exact redirect_uri sent to Google on /auth/google — must be reused on token exchange. */
+  redirectUri?: string;
+}
+
+function parseGoogleOAuthState(state: string | undefined): GoogleOAuthStatePayload {
+  if (!state) return {};
+  try {
+    const data = JSON.parse(Buffer.from(state, 'base64').toString()) as GoogleOAuthStatePayload;
+    return data && typeof data === 'object' ? data : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Send browser back to SPA (e.g. `/auth/google/callback`) with query params — never leave users on API JSON. */
+function redirectToFrontendAfterGoogle(res: Response, params: Record<string, string>) {
+  const url = new URL(FRONTEND_GOOGLE_REDIRECT_URI);
+  for (const [k, v] of Object.entries(params)) {
+    if (v) url.searchParams.set(k, v.slice(0, 800));
+  }
+  return res.redirect(302, url.toString());
+}
+
+/** Audiences accepted when verifying Google `id_token` (web + native). */
+function getGoogleJwtAudiences(): string[] {
+  return [...new Set([GOOGLE_CLIENT_ID, GOOGLE_IOS_CLIENT_ID].filter(Boolean))];
+}
+
+/** OAuth client for `verifyIdToken` only (no OAuth redirect). */
+function createGoogleIdTokenVerifierClient(): OAuth2Client {
+  return new OAuth2Client(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET);
+}
 
 /** Must match the URL Google redirects to for this request (same host used in /auth/google). */
 function getGoogleOAuthRedirectUri(req: Request): string {
   if (GOOGLE_CALLBACK_URL) {
     return GOOGLE_CALLBACK_URL.replace(/\/$/, '');
   }
-  // Render sets this on web services — avoids redirect_uri mismatch if X-Forwarded-* is odd
-  const renderBase = process.env.RENDER_EXTERNAL_URL?.replace(/\/$/, '');
-  if (renderBase) {
+  // Only trust Render URL when actually on Render — a copied RENDER_EXTERNAL_URL in local .env
+  // would otherwise force redirect_uri to production while /auth/google is opened on localhost,
+  // breaking the code exchange (and confusing local testing).
+  const renderBase = (process.env.RENDER_EXTERNAL_URL || '').replace(/\/$/, '');
+  if (renderBase && process.env.RENDER === 'true') {
     return `${renderBase}/api/auth/google/callback`;
   }
   const xfProto = (req.headers['x-forwarded-proto'] as string | undefined)?.split(',')[0]?.trim();
@@ -66,6 +113,52 @@ interface AppleSignInRequest {
 function syntheticEmailForAppleSub(appleSub: string): string {
   const h = createHash('sha256').update(appleSub).digest('hex');
   return `apple_${h}@users.uniflow.internal`;
+}
+
+/** Create or update user from Google profile; returns UniFlow JWT (same claims as web callback). */
+async function signInOrRegisterWithGoogleProfile(
+  googleId: string,
+  email: string,
+  name: string,
+  avatar?: string | null,
+): Promise<{ user: User; token: string }> {
+  let user = await User.findOne({ where: { email } });
+
+  if (user) {
+    if (user.googleId !== googleId) {
+      await user.update({
+        googleId,
+        name: user.name || name,
+        avatar: user.avatar || avatar || undefined,
+      });
+    } else {
+      await user.update({
+        name: user.name || name,
+        avatar: user.avatar || avatar || undefined,
+      });
+    }
+  } else {
+    try {
+      user = await User.create({ email, googleId, name, avatar: avatar || undefined });
+      Profile.create({ userId: user.id, email: user.email, name: user.name }).catch((err) =>
+        console.error('Profile creation error:', err),
+      );
+    } catch (error: any) {
+      if (error.name === 'SequelizeUniqueConstraintError') {
+        const err = new Error('Google account already associated with another email') as Error & { status?: number };
+        err.status = 409;
+        throw err;
+      }
+      throw error;
+    }
+  }
+
+  const token = jwt.sign(
+    { userId: user.id, email: user.email, name: user.name, avatar: user.avatar },
+    JWT_SECRET,
+    { expiresIn: '7d' },
+  );
+  return { user, token };
 }
 
 // Register new user
@@ -361,6 +454,75 @@ export const appleRedirectPlaceholder = (_req: Request, res: Response) => {
   res.status(200).type('text/plain').send('UniFlow Apple Sign-In redirect endpoint');
 };
 
+interface GoogleNativeSignInRequest {
+  idToken: string;
+}
+
+/** Capacitor / native iOS: verify Google `idToken` (aud = web and/or iOS client) and return UniFlow JWT. */
+export const googleNativeSignIn = async (req: Request<{}, {}, GoogleNativeSignInRequest>, res: Response) => {
+  try {
+    const { idToken } = req.body || {};
+    if (!idToken || typeof idToken !== 'string') {
+      return res.status(400).json({ error: 'idToken is required' });
+    }
+    const audiences = getGoogleJwtAudiences();
+    if (!audiences.length) {
+      return res.status(500).json({ error: 'Google OAuth is not configured' });
+    }
+    const client = createGoogleIdTokenVerifierClient();
+    let ticket;
+    try {
+      ticket = await client.verifyIdToken({
+        idToken,
+        audience: audiences.length === 1 ? audiences[0] : audiences,
+      });
+    } catch (e) {
+      console.error('Google native id_token verify failed:', e);
+      return res.status(401).json({ error: 'Invalid Google ID token' });
+    }
+    const payload = ticket.getPayload();
+    if (!payload || !payload.sub || !payload.email) {
+      return res.status(401).json({ error: 'Invalid Google token payload' });
+    }
+    const googleId = payload.sub;
+    const email = payload.email;
+    const name = payload.name || payload.given_name || 'Google User';
+    const avatar = payload.picture;
+    try {
+      const { user, token } = await signInOrRegisterWithGoogleProfile(googleId, email, name, avatar);
+      res.json({
+        user: {
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          avatar: user.avatar,
+          createdAt: user.createdAt,
+          updatedAt: user.updatedAt,
+        },
+        token,
+      });
+    } catch (e: any) {
+      if (e?.status === 409) {
+        return res.status(409).json({ error: e.message || 'Google account conflict' });
+      }
+      throw e;
+    }
+  } catch (error) {
+    console.error('Google native sign-in error:', error);
+    res.status(500).json({ error: 'Google sign-in failed' });
+  }
+};
+
+/** Public client IDs for Capacitor (no secrets). Use web ID as `serverClientId` on iOS. */
+export const googleAuthClientIds = (_req: Request, res: Response) => {
+  res.json({
+    google: {
+      webClientId: GOOGLE_CLIENT_ID || undefined,
+      iosClientId: GOOGLE_IOS_CLIENT_ID || undefined,
+    },
+  });
+};
+
 // Google OAuth callback (placeholder)
 export const googleCallback = async (req: Request, res: Response) => {
   const code = req.query.code as string | undefined;
@@ -370,17 +532,9 @@ export const googleCallback = async (req: Request, res: Response) => {
   // Handle OAuth cancellation or error FIRST (before try-catch)
   if (error || !code) {
     console.log('Google OAuth cancelled or error:', error);
-    
-    // Parse state to get origin
-    let origin = 'signup'; // default
-    if (state) {
-      try {
-        const stateData = JSON.parse(Buffer.from(state, 'base64').toString());
-        origin = stateData.origin || 'signup';
-      } catch (e) {
-        console.log('Failed to parse state:', e);
-      }
-    }
+
+    const stateData = parseGoogleOAuthState(state);
+    const origin = stateData.origin || 'signup';
     
     // Redirect back to the appropriate page based on origin
     const redirectUrl = new URL(FRONTEND_GOOGLE_REDIRECT_URI);
@@ -391,77 +545,51 @@ export const googleCallback = async (req: Request, res: Response) => {
   }
 
   try {
-    const redirectUri = getGoogleOAuthRedirectUri(req);
+    const stateData = parseGoogleOAuthState(state);
+    const redirectUri =
+      typeof stateData.redirectUri === 'string' && stateData.redirectUri.startsWith('http')
+        ? stateData.redirectUri
+        : getGoogleOAuthRedirectUri(req);
     const oauthClient = createGoogleOAuthClient(redirectUri);
 
-    // Exchange code for tokens
-    const { tokens } = await oauthClient.getToken(code);
+    // Exchange code for tokens (explicit redirect_uri must match authorize request)
+    const { tokens } = await oauthClient.getToken({ code, redirect_uri: redirectUri });
     const idToken = tokens.id_token;
     if (!idToken) {
-      return res.status(401).json({ error: 'Failed to obtain id_token from Google' });
+      return redirectToFrontendAfterGoogle(res, { error: 'google_no_id_token' });
     }
 
     // Verify ID token and extract payload
-    const ticket = await oauthClient.verifyIdToken({ idToken, audience: GOOGLE_CLIENT_ID });
+    const audiences = getGoogleJwtAudiences();
+    const ticket = await oauthClient.verifyIdToken({
+      idToken,
+      audience: audiences.length === 1 ? audiences[0] : audiences,
+    });
     const payload = ticket.getPayload();
     if (!payload || !payload.sub || !payload.email) {
-      return res.status(401).json({ error: 'Invalid Google token payload' });
+      return redirectToFrontendAfterGoogle(res, { error: 'google_invalid_token_payload' });
     }
 
     const googleId = payload.sub;
     const email = payload.email;
     const name = payload.name || payload.given_name || 'Google User';
     const avatar = payload.picture;
-    
+
     console.log(`Google OAuth: googleId=${googleId}, email=${email}, name=${name}`);
 
-    // PRIORITIZE EMAIL: First check if email already exists
-    let user = await User.findOne({ where: { email } });
-    
-    if (user) {
-      // Email exists - this is the primary account
-      console.log(`Email ${email} found for user ${user.id} - updating Google ID`);
-      
-      // Update Google ID if it's different (allows multiple Google accounts for same email)
-      if (user.googleId !== googleId) {
-        console.log(`Updating Google ID from ${user.googleId} to ${googleId} for email ${email}`);
-        await user.update({ 
-          googleId: googleId,
-          name: user.name || name, 
-          avatar: user.avatar || avatar 
-        });
-      } else {
-        // Same Google ID, just update profile info
-        await user.update({ 
-          name: user.name || name, 
-          avatar: user.avatar || avatar 
+    let user: User;
+    let token: string;
+    try {
+      ({ user, token } = await signInOrRegisterWithGoogleProfile(googleId, email, name, avatar));
+    } catch (e: any) {
+      if (e?.status === 409) {
+        return redirectToFrontendAfterGoogle(res, {
+          error: 'google_account_conflict',
+          message: (e.message || 'Google account conflict').slice(0, 200),
         });
       }
-    } else {
-      // Email doesn't exist - create new account with this email
-      console.log(`Creating new user with email ${email} and Google ID ${googleId}`);
-      try {
-        user = await User.create({ email, googleId, name, avatar });
-        
-        // Create profile asynchronously (don't wait for it)
-        Profile.create({ userId: user.id, email: user.email, name: user.name })
-          .catch(err => console.error('Profile creation error:', err));
-      } catch (error: any) {
-        if (error.name === 'SequelizeUniqueConstraintError') {
-          console.error(`Google ID conflict: ${googleId} already exists with different email`);
-          return res.status(409).json({ error: 'Google account already associated with another email' });
-        }
-        throw error;
-      }
+      throw e;
     }
-
-    // Issue our JWT with user data
-    const token = jwt.sign({ 
-      userId: user.id, 
-      email: user.email,
-      name: user.name,
-      avatar: user.avatar
-    }, JWT_SECRET, { expiresIn: '7d' });
 
     // Redirect back to frontend with token and user data
     const redirectUrl = new URL(FRONTEND_GOOGLE_REDIRECT_URI);
@@ -479,14 +607,14 @@ export const googleCallback = async (req: Request, res: Response) => {
     console.error('Google OAuth error:', error);
     const redirectUsed = getGoogleOAuthRedirectUri(req);
     console.error('Google OAuth redirect_uri used:', redirectUsed);
-    const detail =
-      (process.env.NODE_ENV === 'development' || process.env.OAUTH_DEBUG === '1') && error?.message
-        ? String(error.message)
-        : undefined;
-    res.status(500).json({
-      error: 'Google OAuth failed',
-      ...(detail ? { detail } : {}),
-      ...(process.env.OAUTH_DEBUG === '1' ? { redirectUri: redirectUsed } : {}),
+    const causeMsg =
+      error?.cause?.message || error?.response?.data?.error_description || error?.message || 'unknown';
+    const debug =
+      process.env.NODE_ENV === 'development' || process.env.OAUTH_DEBUG === '1';
+    return redirectToFrontendAfterGoogle(res, {
+      error: 'google_oauth_failed',
+      ...(debug ? { detail: String(causeMsg).slice(0, 300) } : {}),
+      ...(process.env.OAUTH_DEBUG === '1' ? { redirect_uri: redirectUsed } : {}),
     });
   }
 };
@@ -494,13 +622,19 @@ export const googleCallback = async (req: Request, res: Response) => {
 // Start Google OAuth flow
 export const googleStart = async (req: Request, res: Response) => {
   try {
-    // Generate a state parameter to track the origin
-    const state = Buffer.from(JSON.stringify({ 
-      origin: 'signup',
-      timestamp: Date.now() 
-    })).toString('base64');
-
+    if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
+      console.error('Google OAuth: missing GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET');
+      return res.status(503).json({ error: 'Google sign-in is not configured on this server' });
+    }
     const redirectUri = getGoogleOAuthRedirectUri(req);
+    const state = Buffer.from(
+      JSON.stringify({
+        origin: 'signup',
+        timestamp: Date.now(),
+        redirectUri,
+      } satisfies GoogleOAuthStatePayload),
+    ).toString('base64');
+
     const oauthClient = createGoogleOAuthClient(redirectUri);
 
     const url = oauthClient.generateAuthUrl({

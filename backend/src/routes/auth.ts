@@ -6,6 +6,8 @@ import {
   changePassword,
   googleCallback,
   googleStart,
+  googleNativeSignIn,
+  googleAuthClientIds,
   appleSignIn,
   appleRedirectPlaceholder,
 } from '../controllers/auth';
@@ -18,6 +20,8 @@ router.post('/register', register);
 router.post('/login', login);
 router.post('/apple', appleSignIn);
 router.get('/apple/redirect', appleRedirectPlaceholder);
+router.get('/google/config', googleAuthClientIds);
+router.post('/google', googleNativeSignIn);
 router.get('/google', googleStart);
 router.get('/google/callback', googleCallback);
 

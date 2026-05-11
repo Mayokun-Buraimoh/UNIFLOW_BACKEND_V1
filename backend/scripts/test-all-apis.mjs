@@ -7,6 +7,9 @@
  *      FAIL_ON_MISSING_PUSH=1 — fail if POST /push-tokens/ returns 404 (old API binary)
  */
 
+import fs from 'fs';
+import path from 'path';
+
 const BASE = (process.env.API_BASE_URL || 'http://127.0.0.1:3000/api').replace(/\/$/, '');
 
 const tests = [];
@@ -70,6 +73,19 @@ async function main() {
       body: { identityToken: 'invalid.jwt.token' },
     });
     expect(res, 401, 'auth apple rejects bad token', 'POST', '/auth/apple');
+  }
+
+  {
+    const { res, data } = await http('GET', '/auth/google/config');
+    expect(res, 200, 'auth google config (public client ids)', 'GET', '/auth/google/config');
+    if (!data?.google?.webClientId) console.warn('  (optional) google.webClientId missing — set GOOGLE_CLIENT_ID');
+  }
+
+  {
+    const { res } = await http('POST', '/auth/google', {
+      body: { idToken: 'invalid.id.token' },
+    });
+    expect(res, 401, 'auth google native rejects bad idToken', 'POST', '/auth/google');
   }
 
   {
@@ -143,6 +159,12 @@ async function main() {
   }
 
   {
+    const { res, data } = await http('GET', '/users/me', { headers: auth2 });
+    const ok = res.status === 200 && data?.name === 'API Tester Updated';
+    record('persist: user name after PATCH', 'GET', '/users/me', res.status, ok, ok ? 'saved in DB' : JSON.stringify(data));
+  }
+
+  {
     const { res, data } = await http('GET', '/users/', { headers: auth2 });
     expect(res, 200, 'users list', 'GET', '/users/', Array.isArray(data) ? `${data.length} rows` : '');
   }
@@ -185,6 +207,23 @@ async function main() {
     expect(res, [200, 204], 'profiles preferences', 'PATCH', '/profiles/preferences');
   }
 
+  {
+    const { res, data } = await http('GET', '/profiles/', { headers: auth2 });
+    const nsOk = data?.notificationSettings && data.notificationSettings.push === true;
+    const sgOk = data?.studyGoals && Number(data.studyGoals.hours) === 5;
+    const prefOk = data?.preferences && data.preferences.theme === 'light';
+    const nameOk = data?.name === 'Prof Name';
+    const ok = res.status === 200 && nameOk && nsOk && sgOk && prefOk;
+    record(
+      'persist: profile fields after PATCHes',
+      'GET',
+      '/profiles/',
+      res.status,
+      ok,
+      ok ? 'name, notifications, studyGoals, preferences in DB' : JSON.stringify(data)
+    );
+  }
+
   // --- Tasks ---
   {
     const { res } = await http('GET', '/tasks/', { headers: auth2 });
@@ -224,6 +263,11 @@ async function main() {
       expect(res, 200, 'tasks put', 'PUT', `/tasks/${taskId}`);
     }
     {
+      const { res, data } = await http('GET', `/tasks/${taskId}`, { headers: auth2 });
+      const ok = res.status === 200 && data?.title === 'Smoke task updated' && data?.priority === 'medium';
+      record('persist: task after PUT', 'GET', `/tasks/${taskId}`, res.status, ok, ok ? 'saved in DB' : '');
+    }
+    {
       const { res } = await http('PATCH', `/tasks/${taskId}/toggle`, { headers: auth2 });
       expect(res, [200, 204], 'tasks toggle', 'PATCH', `/tasks/${taskId}/toggle`);
     }
@@ -250,6 +294,14 @@ async function main() {
       },
     });
     expect(res, [200, 201], 'schedule put', 'PUT', '/schedule/');
+  }
+
+  {
+    const { res, data } = await http('GET', '/schedule/', { headers: auth2 });
+    const grid = data?.data?.data;
+    const mon = Array.isArray(grid?.Mon) && grid.Mon.some((s) => String(s).includes('Math'));
+    const ok = res.status === 200 && mon;
+    record('persist: schedule grid after PUT', 'GET', '/schedule/', res.status, ok, ok ? 'weekly JSON in DB' : JSON.stringify(data));
   }
 
   // --- Courses ---
@@ -356,6 +408,25 @@ async function main() {
       const ok = res.status === 201;
       record('course files upload (pdf)', 'POST', `/courses/${courseId}/files`, res.status, ok);
       if (data?.id) fileId = data.id;
+
+      if (res.status === 201 && data?.id) {
+        const { res: r2, data: listData } = await http('GET', `/courses/${courseId}/files`, { headers: auth2 });
+        const files = listData?.files;
+        const listed = Array.isArray(files) && files.some((f) => f.id === data.id);
+        record('persist: course file row in DB (list)', 'GET', `/courses/${courseId}/files`, r2.status, listed, listed ? 'file metadata in DB' : '');
+
+        let storageOk = false;
+        let note = '';
+        if (data.cloudinaryUrl) {
+          storageOk = true;
+          note = 'Cloudinary URL set (local file removed after upload by design)';
+        } else if (data.storagePath) {
+          const abs = path.resolve(process.cwd(), data.storagePath);
+          storageOk = fs.existsSync(abs);
+          note = storageOk ? 'PDF on local disk' : `missing file at ${abs}`;
+        }
+        record('persist: course file bytes (local or cloud)', '—', `/courses/${courseId}/files`, r2.status, storageOk, note);
+      }
     }
 
     if (fileId) {
