@@ -11,6 +11,7 @@ import courseRoutes from './routes/course';
 import eventRoutes from './routes/event';
 import pushTokenRoutes from './routes/pushToken';
 import internalRoutes from './routes/internal';
+import voiceRoutes from './routes/voice';
 import './models'; // Import models to establish associations
 
 const app = express();
@@ -34,6 +35,7 @@ app.use('/api/courses', courseRoutes);
 app.use('/api/events', eventRoutes);
 app.use('/api/push-tokens', pushTokenRoutes);
 app.use('/api/internal', internalRoutes);
+app.use('/api/voice', voiceRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {

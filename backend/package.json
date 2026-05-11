@@ -36,6 +36,7 @@
     "libreoffice-convert": "^1.8.1",
     "multer": "^2.1.1",
     "mysql2": "^3.6.5",
+    "openai": "^4.104.0",
     "pg": "^8.16.3",
     "sequelize": "^6.35.0"
   },

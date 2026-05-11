@@ -13,6 +13,10 @@ import {
   uploadCoursePdfToCloudinary,
 } from '../utils/courseFileCloudinary';
 
+function isUuidParam(fileId: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(fileId || '').trim());
+}
+
 // Storage setup: store files under ./uploads/courses/<courseId>/
 const uploadsRoot = path.resolve(process.cwd(), 'uploads', 'courses');
 
@@ -169,6 +173,10 @@ export const downloadFile = async (req: Request, res: Response) => {
     const courseId = req.params.id;
     const fileId = req.params.fileId;
 
+    if (!isUuidParam(fileId)) {
+      return res.status(400).json({ error: 'fileId must be a UUID (course_files.id).' });
+    }
+
     const course = await Course.findOne({ where: { id: courseId, userId } });
     if (!course) return res.status(404).json({ error: 'Course not found' });
 
@@ -205,6 +213,11 @@ export const downloadFileInternal = async (req: Request, res: Response) => {
     }
 
     const fileId = req.params.fileId;
+
+    if (!isUuidParam(fileId)) {
+      return res.status(400).json({ error: 'fileId must be a UUID (course_files.id).' });
+    }
+
     const fileRecord = await CourseFile.findOne({ where: { id: fileId } });
     if (!fileRecord) return res.status(404).json({ error: 'File not found' });
 
