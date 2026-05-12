@@ -15,7 +15,8 @@
     "view-db": "ts-node view-database.ts",
     "backfill:cloudinary:dry": "ts-node scripts/backfill-cloudinary-course-files.ts --dry-run",
     "backfill:cloudinary": "ts-node scripts/backfill-cloudinary-course-files.ts",
-    "test:apis": "node scripts/test-all-apis.mjs"
+    "test:apis": "node scripts/test-all-apis.mjs",
+    "check:google": "node scripts/check-google-auth.mjs"
   },
   "dependencies": {
     "@types/bcryptjs": "^2.4.6",

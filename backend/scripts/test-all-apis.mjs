@@ -352,6 +352,27 @@ async function main() {
       record('moodle sync', 'POST', '/courses/moodle/sync', res.status, ok, '500 expected without real token');
     }
 
+    // Course id / file id must be UUIDs (local-first lf-temp-… must not 500 the DB layer)
+    {
+      const { res } = await http('GET', '/courses/lf-temp-apitest-123456/files', { headers: auth2 });
+      expect(res, 400, 'course files list rejects non-UUID course id', 'GET', '/courses/lf-temp-.../files');
+    }
+    {
+      const res = await fetch(`${BASE}/courses/lf-temp-apitest-123456/files`, {
+        method: 'POST',
+        headers: auth2,
+      });
+      const ok = res.status === 400;
+      record(
+        'course files upload rejects non-UUID course id (before multer)',
+        'POST',
+        '/courses/lf-temp-.../files',
+        res.status,
+        ok,
+        ok ? 'returns 400, does not write under uploads/courses/lf-temp-*' : (await res.text()).slice(0, 80)
+      );
+    }
+
     // Notes
     let noteId = '';
     {
@@ -427,6 +448,98 @@ async function main() {
         }
         record('persist: course file bytes (local or cloud)', '—', `/courses/${courseId}/files`, r2.status, storageOk, note);
       }
+    }
+
+    // Office-path: .txt → PDF via LibreOffice (skipped if server has no `soffice`)
+    let txtConvertedFileId = '';
+    {
+      const txtBody = 'UniFlow conversion smoke test\nLine two.\n';
+      const blob = new Blob([txtBody], { type: 'text/plain' });
+      const fd = new FormData();
+      fd.append('file', blob, 'smoke-convert.txt');
+      const url = `${BASE}/courses/${courseId}/files`;
+      const res = await fetch(url, { method: 'POST', headers: auth2, body: fd });
+      const text = await res.text();
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = text;
+      }
+      const ok =
+        res.status === 201 &&
+        data?.mimeType === 'application/pdf' &&
+        String(data?.originalName || '').toLowerCase().endsWith('.pdf');
+      record(
+        'course files upload (txt→pdf / LibreOffice)',
+        'POST',
+        `/courses/${courseId}/files`,
+        res.status,
+        ok,
+        res.status === 422
+          ? 'LibreOffice missing or conversion failed (install soffice / use Docker)'
+          : res.status === 415
+            ? 'unexpected: .txt should be allowed'
+            : ok
+              ? 'converted to PDF'
+              : String(data?.error || text).slice(0, 120)
+      );
+      if (ok && data?.id) txtConvertedFileId = data.id;
+    }
+
+    if (txtConvertedFileId) {
+      const dl = await fetch(`${BASE}/courses/${courseId}/files/${txtConvertedFileId}`, {
+        headers: auth2,
+      });
+      const buf = Buffer.from(await dl.arrayBuffer());
+      const magic = buf.slice(0, 4).toString('ascii');
+      const dlOk = dl.ok && magic === '%PDF';
+      record(
+        'course file download (converted PDF bytes)',
+        'GET',
+        `/courses/.../files/${txtConvertedFileId}`,
+        dl.status,
+        dlOk,
+        dlOk ? 'first bytes are %PDF' : `got ${magic || 'empty'} status=${dl.status}`
+      );
+      {
+        const { res } = await http('DELETE', `/courses/${courseId}/files/${txtConvertedFileId}`, {
+          headers: auth2,
+        });
+        expect(res, [200, 204], 'course file delete (txt upload)', 'DELETE', `/courses/.../files/...`);
+      }
+    }
+
+    // Non-UUID file id and unsupported upload types (courseFiles guards)
+    {
+      const { res } = await http('GET', `/courses/${courseId}/files/1234567890123`, { headers: auth2 });
+      expect(res, 400, 'course file download rejects non-UUID file id', 'GET', `/courses/.../files/12345...`);
+    }
+    {
+      const fd = new FormData();
+      fd.append('file', new Blob([Uint8Array.from([0xff, 0xd8, 0xff, 0xe0])], { type: 'image/jpeg' }), 'tiny.jpg');
+      const res = await fetch(`${BASE}/courses/${courseId}/files`, { method: 'POST', headers: auth2, body: fd });
+      let body = '';
+      try {
+        body = await res.text();
+      } catch {
+        /* ignore */
+      }
+      let errJson;
+      try {
+        errJson = JSON.parse(body);
+      } catch {
+        errJson = {};
+      }
+      const ok = res.status === 415 && String(errJson.error || '').toLowerCase().includes('unsupported');
+      record(
+        'course files upload rejects non-Office/non-PDF (415)',
+        'POST',
+        `/courses/${courseId}/files`,
+        res.status,
+        ok,
+        ok ? 'image/jpeg blocked' : body.slice(0, 100)
+      );
     }
 
     if (fileId) {

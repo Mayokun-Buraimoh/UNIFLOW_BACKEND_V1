@@ -41,7 +41,12 @@ router.delete('/:id/notes/:noteId', courseNotesController.deleteCourseNote);
 
 // Course files routes
 router.get('/:id/files', courseFilesController.listFiles);
-router.post('/:id/files', courseFilesController.uploadMiddleware, courseFilesController.uploadFile);
+router.post(
+  '/:id/files',
+  courseFilesController.requireUuidCourseForFileUpload,
+  courseFilesController.uploadMiddleware,
+  courseFilesController.uploadFile
+);
 router.get('/:id/files/:fileId', courseFilesController.downloadFile);
 router.delete('/:id/files/:fileId', courseFilesController.deleteFile);
 

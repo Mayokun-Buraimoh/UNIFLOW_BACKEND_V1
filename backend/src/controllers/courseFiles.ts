@@ -1,4 +1,4 @@
-import { Request, Response } from 'express';
+import { NextFunction, Request, Response } from 'express';
 import path from 'path';
 import fs from 'fs';
 import multer from 'multer';
@@ -13,8 +13,62 @@ import {
   uploadCoursePdfToCloudinary,
 } from '../utils/courseFileCloudinary';
 
+/** Any canonical 8-4-4-4-12 UUID string (used where we only need shape checks). */
 function isUuidParam(fileId: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(fileId || '').trim());
+}
+
+/** LibreOffice can turn these into PDF. Everything else (e.g. images) must not hit convert. */
+const OFFICE_LIKE_EXTENSIONS = new Set([
+  '.doc',
+  '.docx',
+  '.dot',
+  '.dotx',
+  '.ppt',
+  '.pptx',
+  '.pot',
+  '.potx',
+  '.odt',
+  '.ods',
+  '.odp',
+  '.rtf',
+  '.txt',
+]);
+
+function shouldConvertOfficeToPdf(ext: string): boolean {
+  return OFFICE_LIKE_EXTENSIONS.has(ext);
+}
+
+/** PostgreSQL UUID for `courses.id` / `course_files.id` — reject local-first `lf-temp-…` before Sequelize casts (avoids 500). */
+const ROW_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function isRowUuid(s: string | undefined): boolean {
+  return Boolean(s && ROW_UUID_RE.test(String(s).trim()));
+}
+
+/** Run before multer so invalid temp course ids do not write under `uploads/courses/lf-temp-…`. */
+export function requireUuidCourseForFileUpload(req: Request, res: Response, next: NextFunction): void {
+  if (!isRowUuid(req.params.id)) {
+    res.status(400).json({
+      error:
+        'Course is still syncing from this device. Open it again from the Courses list, then upload.',
+    });
+    return;
+  }
+  next();
+}
+
+function rejectUnsupportedUpload(res: Response, originalPath: string): void {
+  try {
+    if (fs.existsSync(originalPath)) fs.unlinkSync(originalPath);
+  } catch {
+    // ignore
+  }
+  res.status(415).json({
+    error:
+      'Unsupported file type. Upload a PDF or a supported document (Word, PowerPoint, OpenDocument, RTF, or plain text).',
+  });
 }
 
 // Storage setup: store files under ./uploads/courses/<courseId>/
@@ -53,6 +107,12 @@ export const uploadFile = async (req: Request, res: Response) => {
   try {
     const userId = (req as any).userId;
     const courseId = req.params.id;
+    if (!isRowUuid(courseId)) {
+      return res.status(400).json({
+        error:
+          'Invalid course id. Open the course from the Courses list after sync finishes, then upload again.',
+      });
+    }
 
     // Verify course belongs to user
     const course = await Course.findOne({ where: { id: courseId, userId } });
@@ -62,7 +122,6 @@ export const uploadFile = async (req: Request, res: Response) => {
     if (!file) {
       return res.status(400).json({ error: 'No file uploaded' });
     }
-    // Convert non-PDF documents to PDF synchronously using LibreOffice
     const convertAsync = promisify(libre.convert);
     const originalPath = file.path;
     const originalExt = path.extname(file.originalname).toLowerCase();
@@ -71,16 +130,17 @@ export const uploadFile = async (req: Request, res: Response) => {
     let finalMime = file.mimetype;
     let finalSize = file.size;
 
-    if (originalExt !== '.pdf') {
+    if (originalExt === '.pdf') {
+      // keep as-is
+    } else if (shouldConvertOfficeToPdf(originalExt)) {
+      // Office-class → PDF via LibreOffice (`soffice` must be on PATH — see Dockerfile)
       try {
         const input = fs.readFileSync(originalPath);
-        // Convert to PDF
         const done = await convertAsync(input, '.pdf', undefined);
         const pdfFilename = `${path.basename(originalPath, path.extname(originalPath))}.pdf`;
         const pdfPath = path.join(path.dirname(originalPath), pdfFilename);
         fs.writeFileSync(pdfPath, done);
 
-        // Remove the original uploaded file (replace with PDF)
         try {
           fs.unlinkSync(originalPath);
         } catch (unlinkErr) {
@@ -99,9 +159,12 @@ export const uploadFile = async (req: Request, res: Response) => {
           console.warn('Failed to cleanup failed upload:', cleanupErr);
         }
         return res.status(422).json({
-          error: 'Document conversion failed. Please upload PDF or fix LibreOffice on server.',
+          error:
+            'Document conversion failed. Install LibreOffice on the server (see backend Dockerfile) or upload a PDF.',
         });
       }
+    } else {
+      return rejectUnsupportedUpload(res, originalPath);
     }
 
     const storagePath = path.relative(process.cwd(), finalPath);
@@ -153,6 +216,11 @@ export const listFiles = async (req: Request, res: Response) => {
   try {
     const userId = (req as any).userId;
     const courseId = req.params.id;
+    if (!isRowUuid(courseId)) {
+      return res.status(400).json({
+        error: 'Invalid course id. Open the course from the Courses list after sync finishes.',
+      });
+    }
 
     // Verify course
     const course = await Course.findOne({ where: { id: courseId, userId } });
@@ -172,9 +240,11 @@ export const downloadFile = async (req: Request, res: Response) => {
     const userId = (req as any).userId;
     const courseId = req.params.id;
     const fileId = req.params.fileId;
-
-    if (!isUuidParam(fileId)) {
-      return res.status(400).json({ error: 'fileId must be a UUID (course_files.id).' });
+    if (!isRowUuid(courseId) || !isRowUuid(fileId)) {
+      return res.status(400).json({
+        error:
+          'Invalid course or file id. If you just created this folder, go back to Courses and open it again after sync, then re-open the note.',
+      });
     }
 
     const course = await Course.findOne({ where: { id: courseId, userId } });
@@ -241,6 +311,9 @@ export const deleteFile = async (req: Request, res: Response) => {
     const userId = (req as any).userId;
     const courseId = req.params.id;
     const fileId = req.params.fileId;
+    if (!isRowUuid(courseId) || !isRowUuid(fileId)) {
+      return res.status(400).json({ error: 'Invalid course or file id.' });
+    }
 
     const course = await Course.findOne({ where: { id: courseId, userId } });
     if (!course) return res.status(404).json({ error: 'Course not found' });
@@ -270,6 +343,7 @@ export const deleteFile = async (req: Request, res: Response) => {
 
 export default {
   uploadMiddleware,
+  requireUuidCourseForFileUpload,
   uploadFile,
   listFiles,
   downloadFile,
