@@ -4,8 +4,52 @@ import {
   createRubySession,
   deleteRubySession,
   getRubySession,
+  setSessionWeeklySchedule,
+  type WeeklyScheduleDayKey,
+  type WeeklyScheduleSnapshot,
 } from '../services/rubySessionStore';
 import { buildRubySystemPrompt, runRubyGreeting, runRubyVoiceTurn } from '../services/rubyVoiceOrchestrator';
+
+const WEEKLY_DAY_KEYS: WeeklyScheduleDayKey[] = ['Mon', 'Tue', 'Wed', 'Thur', 'Fri', 'Sat', 'Sun'];
+
+/**
+ * Best-effort coercion of a request body's `weekly_schedule` payload into the
+ * `WeeklyScheduleSnapshot` shape. Unknown / malformed inputs return
+ * `undefined` so the controller can simply skip storing them — the
+ * `get_todays_classes` tool will then tell the user it doesn't have their
+ * schedule yet rather than blow up the whole start request.
+ */
+function coerceWeeklyScheduleSnapshot(input: unknown): WeeklyScheduleSnapshot | undefined {
+  if (!input || typeof input !== 'object') return undefined;
+  const raw = input as Record<string, unknown>;
+
+  const grid = raw.grid;
+  const venues = raw.venues;
+  const timeSlots = raw.timeSlots;
+  if (!grid || typeof grid !== 'object') return undefined;
+  if (!Array.isArray(timeSlots)) return undefined;
+
+  const cleanGrid = {} as Record<WeeklyScheduleDayKey, string[]>;
+  const cleanVenues = {} as Record<WeeklyScheduleDayKey, string[]>;
+  const gridObj = grid as Record<string, unknown>;
+  const venuesObj = (venues && typeof venues === 'object' ? venues : {}) as Record<string, unknown>;
+
+  for (const day of WEEKLY_DAY_KEYS) {
+    const gRow = gridObj[day];
+    cleanGrid[day] = Array.isArray(gRow)
+      ? gRow.map((entry) => (typeof entry === 'string' ? entry : ''))
+      : [];
+    const vRow = venuesObj[day];
+    cleanVenues[day] = Array.isArray(vRow)
+      ? vRow.map((entry) => (typeof entry === 'string' ? entry : ''))
+      : [];
+  }
+
+  const cleanSlots = timeSlots.filter((s): s is string => typeof s === 'string');
+  const capturedAt = typeof raw.capturedAt === 'string' ? raw.capturedAt : new Date().toISOString();
+
+  return { grid: cleanGrid, venues: cleanVenues, timeSlots: cleanSlots, capturedAt };
+}
 
 async function resolveFirstName(userId: string): Promise<string> {
   const profile = await Profile.findOne({ where: { userId } });
@@ -33,15 +77,38 @@ export async function postVoiceSession(req: Request, res: Response): Promise<voi
       return;
     }
 
+    if (action === 'refresh_schedule') {
+      if (typeof session_id !== 'string' || !session_id) {
+        res.status(400).json({ error: 'session_id is required for refresh_schedule' });
+        return;
+      }
+      const session = getRubySession(session_id);
+      if (!session || session.userId !== userId) {
+        res.status(404).json({ error: 'Invalid or expired session' });
+        return;
+      }
+      const snapshot = coerceWeeklyScheduleSnapshot(req.body?.weekly_schedule);
+      setSessionWeeklySchedule(session, snapshot);
+      res.json({ ok: true, has_schedule: Boolean(snapshot) });
+      return;
+    }
+
     if (action !== 'start') {
-      res.status(400).json({ error: 'action must be "start" or "end"' });
+      res.status(400).json({ error: 'action must be "start", "end", or "refresh_schedule"' });
       return;
     }
 
     const firstName = await resolveFirstName(userId);
     const tz = typeof timezone === 'string' && timezone.length > 0 ? timezone : 'UTC';
+    const weeklySchedule = coerceWeeklyScheduleSnapshot(req.body?.weekly_schedule);
     const systemPrompt = buildRubySystemPrompt(firstName, tz);
-    const session = createRubySession(userId, tz, firstName, { role: 'system', content: systemPrompt });
+    const session = createRubySession(
+      userId,
+      tz,
+      firstName,
+      { role: 'system', content: systemPrompt },
+      weeklySchedule
+    );
     res.json({ session_id: session.id });
   } catch (e) {
     console.error('[voice/session]', e);

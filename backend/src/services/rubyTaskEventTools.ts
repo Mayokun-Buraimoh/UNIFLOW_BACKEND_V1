@@ -1,6 +1,11 @@
 import { Task } from '../models/Task';
 import { Event } from '../models/Event';
 import { scheduleEventReminderForEvent } from './eventReminderScheduler';
+import type {
+  RubySession,
+  WeeklyScheduleDayKey,
+  WeeklyScheduleSnapshot,
+} from './rubySessionStore';
 
 export interface DayOverviewResult {
   date: string;
@@ -206,13 +211,210 @@ export async function rubyCreateEvent(
   return { ok: true, event: serializeEvent(event) };
 }
 
+/* ---------- Today's classes (weekly schedule) ---------- */
+
+const JS_DAY_TO_KEY: Record<number, WeeklyScheduleDayKey> = {
+  0: 'Sun',
+  1: 'Mon',
+  2: 'Tue',
+  3: 'Wed',
+  4: 'Thur',
+  5: 'Fri',
+  6: 'Sat',
+};
+
+/**
+ * Get the user's local day-of-week key (Mon..Sun, with `Thur` for Thursday)
+ * for "now" in their IANA time zone.
+ */
+function todayWeekdayKey(timeZone: string): WeeklyScheduleDayKey {
+  const tz = timeZone || 'UTC';
+  // `en-US` short weekday is Sun/Mon/.../Sat — easier to map via the JS day
+  // index than to special-case "Thur" vs "Thu" string slicing.
+  const partsFmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz,
+    weekday: 'short',
+  });
+  const short = partsFmt.format(new Date());
+  const idx = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(short);
+  return JS_DAY_TO_KEY[idx >= 0 ? idx : 0]!;
+}
+
+/** Minutes since 00:00 in the user's timezone for the current instant. */
+function nowMinutesInTimeZone(timeZone: string): number {
+  const tz = timeZone || 'UTC';
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: tz,
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(new Date());
+  const hh = Number(parts.find((p) => p.type === 'hour')?.value || '0');
+  const mm = Number(parts.find((p) => p.type === 'minute')?.value || '0');
+  return hh * 60 + mm;
+}
+
+/** Parse "HH:MM - HH:MM" → start/end minutes-since-midnight. */
+function parseSlotMinutes(slot: string): { startMin: number; endMin: number } | null {
+  if (typeof slot !== 'string') return null;
+  const m = slot.match(/(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})/);
+  if (!m) return null;
+  const startMin = Number(m[1]) * 60 + Number(m[2]);
+  const endMin = Number(m[3]) * 60 + Number(m[4]);
+  if (!Number.isFinite(startMin) || !Number.isFinite(endMin)) return null;
+  return { startMin, endMin };
+}
+
+function formatMinutesAsTime(min: number): string {
+  const safe = ((Math.round(min) % 1440) + 1440) % 1440;
+  const h = Math.floor(safe / 60);
+  const m = safe % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
+export interface TodaysClassesResult {
+  ok: true;
+  hasSchedule: boolean;
+  date: string;
+  timezone: string;
+  weekdayKey: WeeklyScheduleDayKey;
+  weekdayName: string;
+  totalToday: number;
+  finished: number;
+  inProgress: number;
+  upcoming: number;
+  classes: Array<{
+    title: string;
+    venue: string | null;
+    slot: string;
+    startTime: string;
+    endTime: string;
+    status: 'finished' | 'in_progress' | 'upcoming';
+  }>;
+  currentClass: {
+    title: string;
+    venue: string | null;
+    slot: string;
+    endsInMinutes: number;
+  } | null;
+  nextClass: {
+    title: string;
+    venue: string | null;
+    slot: string;
+    startsInMinutes: number;
+  } | null;
+}
+
+/**
+ * Compute "today's classes" using the weekly-schedule snapshot the client
+ * shipped at session start (or via `refresh_schedule`). Returns a structured
+ * payload Ruby can use to answer "how many classes do I have today?",
+ * "how many are left?", "what's my next class?", etc.
+ */
+export function rubyGetTodaysClasses(
+  session: RubySession
+):
+  | TodaysClassesResult
+  | { ok: false; error: 'no_schedule_provided'; hasSchedule: false } {
+  const snapshot: WeeklyScheduleSnapshot | undefined = session.weeklySchedule;
+  if (!snapshot) {
+    return { ok: false, error: 'no_schedule_provided', hasSchedule: false };
+  }
+
+  const tz = session.timezone || 'UTC';
+  const weekdayKey = todayWeekdayKey(tz);
+  const weekdayName = new Intl.DateTimeFormat('en-US', { timeZone: tz, weekday: 'long' }).format(new Date());
+  const today = todayYmd(tz);
+  const nowMin = nowMinutesInTimeZone(tz);
+
+  const dayClasses: string[] = Array.isArray(snapshot.grid?.[weekdayKey]) ? snapshot.grid[weekdayKey] : [];
+  const dayVenues: string[] = Array.isArray(snapshot.venues?.[weekdayKey]) ? snapshot.venues[weekdayKey] : [];
+  const slots: string[] = Array.isArray(snapshot.timeSlots) ? snapshot.timeSlots : [];
+
+  const classes: TodaysClassesResult['classes'] = [];
+  let finished = 0;
+  let inProgress = 0;
+  let upcoming = 0;
+  let currentClass: TodaysClassesResult['currentClass'] = null;
+  let nextClass: TodaysClassesResult['nextClass'] = null;
+  let nextStartMin = Number.POSITIVE_INFINITY;
+
+  for (let i = 0; i < dayClasses.length; i++) {
+    const title = (dayClasses[i] || '').trim();
+    if (!title) continue;
+    const slot = slots[i] || '';
+    const parsed = parseSlotMinutes(slot);
+    if (!parsed) {
+      // No time data for this row — count it but mark it as `upcoming` so we
+      // don't lose visibility of the class entirely.
+      classes.push({ title, venue: (dayVenues[i] || '').trim() || null, slot, startTime: '', endTime: '', status: 'upcoming' });
+      upcoming += 1;
+      continue;
+    }
+    const { startMin, endMin } = parsed;
+    let status: 'finished' | 'in_progress' | 'upcoming';
+    if (nowMin >= endMin) {
+      status = 'finished';
+      finished += 1;
+    } else if (nowMin >= startMin) {
+      status = 'in_progress';
+      inProgress += 1;
+      if (!currentClass) {
+        currentClass = {
+          title,
+          venue: (dayVenues[i] || '').trim() || null,
+          slot,
+          endsInMinutes: Math.max(0, endMin - nowMin),
+        };
+      }
+    } else {
+      status = 'upcoming';
+      upcoming += 1;
+      if (startMin < nextStartMin) {
+        nextStartMin = startMin;
+        nextClass = {
+          title,
+          venue: (dayVenues[i] || '').trim() || null,
+          slot,
+          startsInMinutes: Math.max(0, startMin - nowMin),
+        };
+      }
+    }
+    classes.push({
+      title,
+      venue: (dayVenues[i] || '').trim() || null,
+      slot,
+      startTime: formatMinutesAsTime(startMin),
+      endTime: formatMinutesAsTime(endMin),
+      status,
+    });
+  }
+
+  return {
+    ok: true,
+    hasSchedule: true,
+    date: today,
+    timezone: tz,
+    weekdayKey,
+    weekdayName,
+    totalToday: classes.length,
+    finished,
+    inProgress,
+    upcoming,
+    classes,
+    currentClass,
+    nextClass,
+  };
+}
+
 export async function executeRubyTool(
   name: string,
   args: Record<string, unknown>,
-  userId: string,
-  timeZone: string,
+  session: RubySession,
   mutations: ToolMutationFlags
 ): Promise<string> {
+  const userId = session.userId;
+  const timeZone = session.timezone;
   try {
     switch (name) {
       case 'get_day_overview': {
@@ -261,6 +463,9 @@ export async function executeRubyTool(
           mutations
         );
         return JSON.stringify(r);
+      }
+      case 'get_todays_classes': {
+        return JSON.stringify(rubyGetTodaysClasses(session));
       }
       default:
         return JSON.stringify({ ok: false, error: `Unknown tool: ${name}` });

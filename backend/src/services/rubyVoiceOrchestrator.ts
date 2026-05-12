@@ -27,20 +27,69 @@ function getClient(): OpenAI {
   return new OpenAI({ apiKey: key });
 }
 
-export function buildRubySystemPrompt(firstName: string, timeZone: string): string {
+/**
+ * Compute YYYY-MM-DD and the weekday name (e.g. "Tuesday") for `now` in
+ * the given IANA time zone. Used to anchor Ruby's understanding of "today",
+ * "tomorrow", "next Friday", etc. — without this anchor the LLM has no
+ * reliable clock and routinely mis-resolves relative dates.
+ */
+function dateAnchorInTimeZone(now: Date, timeZone: string): { ymd: string; weekday: string } {
   const tz = timeZone || 'UTC';
+  const ymd = new Intl.DateTimeFormat('en-CA', {
+    timeZone: tz,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(now);
+  const weekday = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz,
+    weekday: 'long',
+  }).format(now);
+  return { ymd, weekday };
+}
+
+export function buildRubySystemPrompt(firstName: string, timeZone: string, now: Date = new Date()): string {
+  const tz = timeZone || 'UTC';
+  const { ymd, weekday } = dateAnchorInTimeZone(now, tz);
   return `You are Ruby, a concise, friendly, action-oriented voice assistant for UniFlow.
 
 User first name: ${firstName}
-User timezone (IANA): ${tz}. Use it for "today", "tomorrow", and interpreting dates like "next Friday" into YYYY-MM-DD for tools.
+User timezone (IANA): ${tz}.
+Current date in user's timezone: ${ymd} (${weekday}). Treat this as the absolute source of truth for "today" — do NOT rely on internal model knowledge of the date.
 
 Rules:
 - The app already played your spoken introduction to the user at session start. Do not repeat that full greeting unless they ask; continue naturally.
 - When describing plans, completion, or schedules, ONLY use data returned from your tools (get_day_overview, create_task, etc.). Never invent tasks or events.
-- For calendar events, the create_event tool requires title, time, and date (YYYY-MM-DD). If the user wants an event but has not given a time (or date), ask ONE short clarifying question instead of calling create_event.
-- Prefer create_task for day goals and errands ("go to the gym today"). Prefer create_event when the user gives a specific time or explicit calendar language.
-- After successfully creating or updating something, confirm in one short sentence.
-- Keep spoken replies brief and natural.`;
+- Prefer create_task for day goals and errands ("go to the gym today"). Prefer create_event when the user gives a specific time or explicit calendar language ("schedule", "meeting", "lecture", "appointment").
+
+Creating calendar events (create_event):
+- create_event REQUIRES title, time (e.g. "15:00" or "3:00 PM"), and date (YYYY-MM-DD). Never call create_event with any of those missing.
+- If the user wants an event but is missing date OR time (or both), ask ONE short clarifying question that requests exactly the missing piece. Do not ask a long open-ended question.
+  Examples:
+    User: "Add a study session for tomorrow." → "Sure — what time should I set?"
+    User: "Schedule a meeting at 3pm." → "Got it — what date?"
+    User: "Put gym in my calendar." → "What day and time?"
+- Always resolve relative dates to YYYY-MM-DD using the "Current date" anchor above. Examples (assuming today is ${ymd}, ${weekday}):
+    - "tomorrow" → today + 1 day
+    - "this Friday" → the upcoming Friday in the current calendar week (Mon-Sun); if today already is Friday, this Friday means today.
+    - "next Friday" or "next week Friday" → the Friday of the calendar week AFTER the current one (so always 7+ days away from "this Friday").
+    - "in 3 days" → today + 3 days
+    - "the 24th" → the 24th of the current month if it's still upcoming this month, otherwise the 24th of next month.
+  If a phrase is genuinely ambiguous (e.g. it's Wednesday and the user just says "Friday"), ask one short clarifying question instead of guessing.
+- Convert spoken times to 24-hour or unambiguous 12-hour strings ("3 PM" → "15:00", "half past nine" → "09:30").
+- After successfully creating or updating something, confirm in one short sentence including the resolved date and time ("Done — Stats lecture is on the calendar for Friday, May 16 at 3 PM.").
+
+Today's classes (get_todays_classes):
+- Use get_todays_classes for ANY question about classes/lectures today: counts ("how many classes do I have today?"), progress ("how many classes have I gone for?", "how many are left?"), or status ("am I in a class right now?", "what's my next class?").
+- The tool already knows today's weekday and the current time in the user's timezone. Trust its returned counts (totalToday, finished, inProgress, upcoming) and the resolved currentClass / nextClass instead of recomputing.
+- If the tool returns ok:false with error "no_schedule_provided" (or hasSchedule:false), tell the user you don't see a weekly schedule yet and that they can set it up in the Schedule tab — don't guess class counts.
+- When totalToday is 0, just say they have no classes scheduled today (e.g. "Looks like you don't have any classes today.").
+- Keep replies short. Examples:
+    - totalToday=4, finished=1, inProgress=0, upcoming=3 → "You've got 4 classes today, 1 done, 3 left."
+    - currentClass present → "You're in {title} right now, ends in about {endsInMinutes} minutes."
+    - nextClass present → "Next up is {title} at {slot}."
+
+Keep spoken replies brief and natural.`;
 }
 
 const RUBY_TOOLS: ChatCompletionTool[] = [
@@ -116,6 +165,18 @@ const RUBY_TOOLS: ChatCompletionTool[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'get_todays_classes',
+      description:
+        "Return the user's classes for today from their on-device weekly schedule snapshot. Use this for any question about today's lectures/classes (e.g. 'how many classes do I have today?', 'how many have I gone to?', 'how many are left?', 'what's next?'). Returns total/finished/in_progress/upcoming counts plus each class with status and time slot. If hasSchedule=false the user hasn't set up a weekly schedule yet — tell them to set one up in the Schedule tab.",
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+    },
+  },
 ];
 
 export interface RubyVoiceTurnResult {
@@ -183,6 +244,16 @@ export async function runRubyVoiceTurn(params: {
     transcript = '(silence or unclear audio)';
   }
 
+  // Refresh the date anchor on the system message before each turn so Ruby
+  // never resolves "today"/"tomorrow"/"next Friday" against a stale clock
+  // from when the session was first opened (sessions can outlive midnight).
+  if (session.messages.length > 0 && session.messages[0]?.role === 'system') {
+    session.messages[0] = {
+      role: 'system',
+      content: buildRubySystemPrompt(session.firstName, session.timezone),
+    };
+  }
+
   const userMessage: ChatCompletionMessageParam = { role: 'user', content: transcript };
   appendMessages(session, [userMessage]);
 
@@ -221,7 +292,7 @@ export async function runRubyVoiceTurn(params: {
         } catch {
           args = {};
         }
-        const content = await executeRubyTool(fn.name, args, session.userId, session.timezone, mutations);
+        const content = await executeRubyTool(fn.name, args, session, mutations);
         toolMsgs.push({
           role: 'tool',
           tool_call_id: tc.id,
