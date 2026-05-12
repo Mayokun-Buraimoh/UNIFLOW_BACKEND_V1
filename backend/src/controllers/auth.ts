@@ -17,17 +17,63 @@ const GOOGLE_IOS_CLIENT_ID = (process.env.GOOGLE_IOS_CLIENT_ID || '').trim();
 const GOOGLE_CALLBACK_URL = (process.env.GOOGLE_CALLBACK_URL || '').trim();
 /** Public SPA origin (no path); used if FRONTEND_GOOGLE_REDIRECT_URI is unset (e.g. on Render). */
 const FRONTEND_URL = (process.env.FRONTEND_URL || '').trim().replace(/\/$/, '');
-const FRONTEND_GOOGLE_REDIRECT_URI = (
-  (process.env.FRONTEND_GOOGLE_REDIRECT_URI || '').trim() ||
-  (FRONTEND_URL ? `${FRONTEND_URL}/auth/google/callback` : '') ||
-  'http://localhost:5173/auth/google/callback'
-).trim();
+
+/** Google iOS REVERSED_CLIENT_ID URLs are often written `scheme/oauthredirect`; `new URL()` needs `scheme:/oauthredirect`. */
+function normalizeFrontendGoogleRedirectUri(uri: string): string {
+  const u = uri.trim();
+  if (!u) return u;
+  if (
+    u.startsWith('com.googleusercontent.apps.') &&
+    u.includes('/oauthredirect') &&
+    !u.includes(':/oauthredirect')
+  ) {
+    const i = u.indexOf('/oauthredirect');
+    return `${u.slice(0, i)}:/oauthredirect${u.slice(i + '/oauthredirect'.length)}`;
+  }
+  return u;
+}
+
+/** Web / browser return after Google (http(s) → `/auth/google/callback`). */
+const FRONTEND_GOOGLE_REDIRECT_URI = normalizeFrontendGoogleRedirectUri(
+  (
+    (process.env.FRONTEND_GOOGLE_REDIRECT_URI || '').trim() ||
+    (FRONTEND_URL ? `${FRONTEND_URL}/auth/google/callback` : '') ||
+    'http://localhost:5173/auth/google/callback'
+  ).trim(),
+);
 
 interface GoogleOAuthStatePayload {
   origin?: string;
   timestamp?: number;
   /** Exact redirect_uri sent to Google on /auth/google — must be reused on token exchange. */
   redirectUri?: string;
+  /** `ios` = TestFlight / Capacitor (custom URL scheme); default / omitted = web SPA. */
+  appClient?: 'web' | 'ios';
+}
+
+function iosOAuthRedirectUriFromIosClientId(iosClientId: string): string {
+  const suffix = '.apps.googleusercontent.com';
+  const id = iosClientId.trim();
+  if (!id || !id.endsWith(suffix)) return '';
+  const prefix = id.slice(0, -suffix.length);
+  return normalizeFrontendGoogleRedirectUri(`com.googleusercontent.apps.${prefix}/oauthredirect`);
+}
+
+/** Optional override for native return (otherwise derived from GOOGLE_IOS_CLIENT_ID). */
+const FRONTEND_GOOGLE_REDIRECT_URI_IOS = normalizeFrontendGoogleRedirectUri(
+  (process.env.FRONTEND_GOOGLE_REDIRECT_URI_IOS || '').trim(),
+);
+
+function resolveFrontendAfterGoogle(stateData: GoogleOAuthStatePayload): string {
+  if (stateData.appClient === 'ios') {
+    if (FRONTEND_GOOGLE_REDIRECT_URI_IOS) return FRONTEND_GOOGLE_REDIRECT_URI_IOS;
+    const derived = iosOAuthRedirectUriFromIosClientId(GOOGLE_IOS_CLIENT_ID);
+    if (derived) return derived;
+    console.warn(
+      'Google OAuth: app=ios but set FRONTEND_GOOGLE_REDIRECT_URI_IOS or GOOGLE_IOS_CLIENT_ID; using web redirect URI',
+    );
+  }
+  return FRONTEND_GOOGLE_REDIRECT_URI;
 }
 
 function parseGoogleOAuthState(state: string | undefined): GoogleOAuthStatePayload {
@@ -40,9 +86,14 @@ function parseGoogleOAuthState(state: string | undefined): GoogleOAuthStatePaylo
   }
 }
 
-/** Send browser back to SPA (e.g. `/auth/google/callback`) with query params — never leave users on API JSON. */
-function redirectToFrontendAfterGoogle(res: Response, params: Record<string, string>) {
-  const url = new URL(FRONTEND_GOOGLE_REDIRECT_URI);
+/** Send user back to SPA or native app with query params — never leave users on API JSON. */
+function redirectToFrontendAfterGoogle(
+  res: Response,
+  params: Record<string, string>,
+  stateData: GoogleOAuthStatePayload = {},
+) {
+  const base = resolveFrontendAfterGoogle(stateData);
+  const url = new URL(base);
   for (const [k, v] of Object.entries(params)) {
     if (v) url.searchParams.set(k, v.slice(0, 800));
   }
@@ -534,18 +585,18 @@ export const googleCallback = async (req: Request, res: Response) => {
     console.log('Google OAuth cancelled or error:', error);
 
     const stateData = parseGoogleOAuthState(state);
-    const origin = stateData.origin || 'signup';
-    
-    // Redirect back to the appropriate page based on origin
-    const redirectUrl = new URL(FRONTEND_GOOGLE_REDIRECT_URI);
-    redirectUrl.searchParams.set('error', 'oauth_cancelled');
-    redirectUrl.searchParams.set('origin', origin);
-    console.log('Redirecting to:', redirectUrl.toString());
-    return res.redirect(302, redirectUrl.toString());
+
+    return redirectToFrontendAfterGoogle(
+      res,
+      { error: 'oauth_cancelled', origin: stateData.origin || 'signup' },
+      stateData,
+    );
   }
 
+  let stateForErrors: GoogleOAuthStatePayload = {};
   try {
     const stateData = parseGoogleOAuthState(state);
+    stateForErrors = stateData;
     const redirectUri =
       typeof stateData.redirectUri === 'string' && stateData.redirectUri.startsWith('http')
         ? stateData.redirectUri
@@ -556,7 +607,7 @@ export const googleCallback = async (req: Request, res: Response) => {
     const { tokens } = await oauthClient.getToken({ code, redirect_uri: redirectUri });
     const idToken = tokens.id_token;
     if (!idToken) {
-      return redirectToFrontendAfterGoogle(res, { error: 'google_no_id_token' });
+      return redirectToFrontendAfterGoogle(res, { error: 'google_no_id_token' }, stateData);
     }
 
     // Verify ID token and extract payload
@@ -567,7 +618,7 @@ export const googleCallback = async (req: Request, res: Response) => {
     });
     const payload = ticket.getPayload();
     if (!payload || !payload.sub || !payload.email) {
-      return redirectToFrontendAfterGoogle(res, { error: 'google_invalid_token_payload' });
+      return redirectToFrontendAfterGoogle(res, { error: 'google_invalid_token_payload' }, stateData);
     }
 
     const googleId = payload.sub;
@@ -583,26 +634,33 @@ export const googleCallback = async (req: Request, res: Response) => {
       ({ user, token } = await signInOrRegisterWithGoogleProfile(googleId, email, name, avatar));
     } catch (e: any) {
       if (e?.status === 409) {
-        return redirectToFrontendAfterGoogle(res, {
-          error: 'google_account_conflict',
-          message: (e.message || 'Google account conflict').slice(0, 200),
-        });
+        return redirectToFrontendAfterGoogle(
+          res,
+          {
+            error: 'google_account_conflict',
+            message: (e.message || 'Google account conflict').slice(0, 200),
+          },
+          stateData,
+        );
       }
       throw e;
     }
 
-    // Redirect back to frontend with token and user data
-    const redirectUrl = new URL(FRONTEND_GOOGLE_REDIRECT_URI);
-    redirectUrl.searchParams.set('token', token);
-    redirectUrl.searchParams.set('user', JSON.stringify({
-      id: user.id,
-      email: user.email,
-      name: user.name,
-      avatar: user.avatar,
-      createdAt: user.createdAt,
-      updatedAt: user.updatedAt
-    }));
-    res.redirect(302, redirectUrl.toString());
+    return redirectToFrontendAfterGoogle(
+      res,
+      {
+        token,
+        user: JSON.stringify({
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          avatar: user.avatar,
+          createdAt: user.createdAt,
+          updatedAt: user.updatedAt,
+        }),
+      },
+      stateData,
+    );
   } catch (error: any) {
     console.error('Google OAuth error:', error);
     const redirectUsed = getGoogleOAuthRedirectUri(req);
@@ -611,11 +669,15 @@ export const googleCallback = async (req: Request, res: Response) => {
       error?.cause?.message || error?.response?.data?.error_description || error?.message || 'unknown';
     const debug =
       process.env.NODE_ENV === 'development' || process.env.OAUTH_DEBUG === '1';
-    return redirectToFrontendAfterGoogle(res, {
-      error: 'google_oauth_failed',
-      ...(debug ? { detail: String(causeMsg).slice(0, 300) } : {}),
-      ...(process.env.OAUTH_DEBUG === '1' ? { redirect_uri: redirectUsed } : {}),
-    });
+    return redirectToFrontendAfterGoogle(
+      res,
+      {
+        error: 'google_oauth_failed',
+        ...(debug ? { detail: String(causeMsg).slice(0, 300) } : {}),
+        ...(process.env.OAUTH_DEBUG === '1' ? { redirect_uri: redirectUsed } : {}),
+      },
+      stateForErrors,
+    );
   }
 };
 
@@ -626,12 +688,18 @@ export const googleStart = async (req: Request, res: Response) => {
       console.error('Google OAuth: missing GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET');
       return res.status(503).json({ error: 'Google sign-in is not configured on this server' });
     }
+    const appRaw = String(req.query.app ?? '')
+      .trim()
+      .toLowerCase();
+    const appClient: 'web' | 'ios' = appRaw === 'ios' ? 'ios' : 'web';
+
     const redirectUri = getGoogleOAuthRedirectUri(req);
     const state = Buffer.from(
       JSON.stringify({
         origin: 'signup',
         timestamp: Date.now(),
         redirectUri,
+        appClient,
       } satisfies GoogleOAuthStatePayload),
     ).toString('base64');
 
