@@ -61,16 +61,15 @@ export const getTask = async (req: Request, res: Response) => {
 export const createTask = async (req: Request, res: Response) => {
   try {
     const userId = (req as any).userId; // Set by auth middleware
-    const data = req.body;
-    
+    const data = req.body || {};
+
     console.log(`Creating task for user ${userId}: ${data.title}`);
 
-    // Validation
-    if (!data.title || data.title.trim().length === 0) {
+    if (!data.title || String(data.title).trim().length === 0) {
       return res.status(400).json({ error: 'Task title is required' });
     }
 
-    if (data.title.length > 100) {
+    if (String(data.title).length > 100) {
       return res.status(400).json({ error: 'Task title must be 100 characters or less' });
     }
 
@@ -82,10 +81,17 @@ export const createTask = async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Invalid status' });
     }
 
+    // Whitelist allowed fields. Do NOT trust `id` from the client: the app
+    // sends local-first temp ids like `lf-temp-…`, which Postgres' UUID
+    // column rejects with `22P02`. Let the model generate a UUIDv4 instead.
     const task = await Task.create({
-      ...data,
       userId,
-    });
+      title: String(data.title).trim(),
+      description: data.description,
+      priority: data.priority,
+      status: data.status,
+      dueDate: data.dueDate,
+    } as any);
 
     res.status(201).json(task);
   } catch (error) {

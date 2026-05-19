@@ -3,51 +3,57 @@ import { authenticateToken } from '../middleware/auth';
 import * as courseController from '../controllers/course';
 import * as courseNotesController from '../controllers/courseNotes';
 import * as courseFilesController from '../controllers/courseFiles';
+import { requireUuidParams } from '../utils/uuid';
 
 const router = Router();
 
-// All routes require authentication
 router.use(authenticateToken);
 
-// Get all courses for the authenticated user
 router.get('/', courseController.getUserCourses);
-
-// Create course manually
 router.post('/', courseController.createCourse);
 
-// Get single course
-router.get('/:id', courseController.getCourse);
-
-// Create or update Moodle connection
+// Moodle endpoints (define BEFORE `/:id` so they aren't shadowed)
 router.post('/moodle/connect', courseController.createOrUpdateMoodleConnection);
-
-// Get Moodle connection status
 router.get('/moodle/connection', courseController.getMoodleConnection);
-
-// Sync courses from Moodle
 router.post('/moodle/sync', courseController.syncCourses);
 
-// Update course
-router.patch('/:id', courseController.updateCourse);
-
-// Delete course
-router.delete('/:id', courseController.deleteCourse);
+// Single-course routes — UUID required (client local-first temp ids like
+// `lf-temp-…` get a clean 400 instead of crashing the Postgres uuid cast).
+router.get('/:id', requireUuidParams('id'), courseController.getCourse);
+router.patch('/:id', requireUuidParams('id'), courseController.updateCourse);
+router.delete('/:id', requireUuidParams('id'), courseController.deleteCourse);
 
 // Course notes routes (nested under course)
-router.get('/:id/notes', courseNotesController.getCourseNotes);
-router.post('/:id/notes', courseNotesController.createCourseNote);
-router.patch('/:id/notes/:noteId', courseNotesController.updateCourseNote);
-router.delete('/:id/notes/:noteId', courseNotesController.deleteCourseNote);
+router.get('/:id/notes', requireUuidParams('id'), courseNotesController.getCourseNotes);
+router.post('/:id/notes', requireUuidParams('id'), courseNotesController.createCourseNote);
+router.patch(
+  '/:id/notes/:noteId',
+  requireUuidParams('id', 'noteId'),
+  courseNotesController.updateCourseNote
+);
+router.delete(
+  '/:id/notes/:noteId',
+  requireUuidParams('id', 'noteId'),
+  courseNotesController.deleteCourseNote
+);
 
 // Course files routes
-router.get('/:id/files', courseFilesController.listFiles);
+router.get('/:id/files', requireUuidParams('id'), courseFilesController.listFiles);
 router.post(
   '/:id/files',
   courseFilesController.requireUuidCourseForFileUpload,
   courseFilesController.uploadMiddleware,
   courseFilesController.uploadFile
 );
-router.get('/:id/files/:fileId', courseFilesController.downloadFile);
-router.delete('/:id/files/:fileId', courseFilesController.deleteFile);
+router.get(
+  '/:id/files/:fileId',
+  requireUuidParams('id', 'fileId'),
+  courseFilesController.downloadFile
+);
+router.delete(
+  '/:id/files/:fileId',
+  requireUuidParams('id', 'fileId'),
+  courseFilesController.deleteFile
+);
 
 export default router;

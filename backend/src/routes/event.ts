@@ -1,25 +1,17 @@
 import { Router } from 'express';
 import { authenticateToken } from '../middleware/auth';
 import * as eventController from '../controllers/event';
+import { requireUuidParams } from '../utils/uuid';
 
 const router = Router();
 
-// All routes require authentication
 router.use(authenticateToken);
 
-// Get all events for the authenticated user
 router.get('/', eventController.getUserEvents);
-
-// Create event
 router.post('/', eventController.createEvent);
 
-// Get single event
-router.get('/:id', eventController.getEvent);
-
-// Update event
-router.put('/:id', eventController.updateEvent);
-
-// Delete event
-router.delete('/:id', eventController.deleteEvent);
+router.get('/:id', requireUuidParams('id'), eventController.getEvent);
+router.put('/:id', requireUuidParams('id'), eventController.updateEvent);
+router.delete('/:id', requireUuidParams('id'), eventController.deleteEvent);
 
 export default router;

@@ -1,27 +1,27 @@
 import express from 'express';
-import { 
-  getUserTasks, 
-  getTask, 
-  createTask, 
-  updateTask, 
-  deleteTask, 
-  toggleTaskStatus, 
-  getTaskStats 
+import {
+  getUserTasks,
+  getTask,
+  createTask,
+  updateTask,
+  deleteTask,
+  toggleTaskStatus,
+  getTaskStats,
 } from '../controllers/task';
 import { authenticateToken } from '../middleware/auth';
+import { requireUuidParams } from '../utils/uuid';
 
 const router = express.Router();
 
-// All routes require authentication
 router.use(authenticateToken);
 
-// Task routes
 router.get('/', getUserTasks);
 router.get('/stats', getTaskStats);
-router.get('/:id', getTask);
 router.post('/', createTask);
-router.put('/:id', updateTask);
-router.patch('/:id/toggle', toggleTaskStatus);
-router.delete('/:id', deleteTask);
+
+router.get('/:id', requireUuidParams('id'), getTask);
+router.put('/:id', requireUuidParams('id'), updateTask);
+router.patch('/:id/toggle', requireUuidParams('id'), toggleTaskStatus);
+router.delete('/:id', requireUuidParams('id'), deleteTask);
 
 export default router;

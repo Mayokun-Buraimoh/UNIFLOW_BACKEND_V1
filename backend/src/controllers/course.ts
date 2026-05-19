@@ -1,4 +1,5 @@
 import { Request, Response } from 'express';
+import { literal } from 'sequelize';
 import { Course } from '../models/Course';
 import { MoodleConnection } from '../models/MoodleConnection';
 import { MoodleService } from '../services/moodleService';
@@ -7,10 +8,22 @@ import { MoodleService } from '../services/moodleService';
 export const getUserCourses = async (req: Request, res: Response) => {
   try {
     const userId = (req as any).userId; // Set by auth middleware
-    
+
+    // Include a `fileCount` per course so the Courses list can show
+    // a real "N notes" badge without making N additional round trips.
     const courses = await Course.findAll({
       where: { userId, visible: true },
       order: [['code', 'ASC']],
+      attributes: {
+        include: [
+          [
+            literal(
+              '(SELECT COUNT(*)::int FROM "course_files" AS cf WHERE cf."courseId" = "Course"."id")'
+            ),
+            'fileCount',
+          ],
+        ],
+      },
     });
 
     res.json({ courses });

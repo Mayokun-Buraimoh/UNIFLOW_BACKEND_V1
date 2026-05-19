@@ -25,6 +25,26 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// Lightweight request logger. Helps diagnose "saves not reaching the server" —
+// every request prints method, URL, status, duration, and (when non-2xx) the
+// origin/auth-presence so we can tell at a glance whether the client even hit
+// this backend. Toggle with REQUEST_LOG=quiet to silence noisy 200s.
+app.use((req, res, next) => {
+  const start = Date.now();
+  const quiet = process.env.REQUEST_LOG === 'quiet';
+  res.on('finish', () => {
+    const ms = Date.now() - start;
+    if (quiet && res.statusCode < 400 && req.method === 'GET') return;
+    const origin = req.headers.origin || req.headers.referer || '-';
+    const auth = req.headers.authorization ? 'auth' : 'noauth';
+    // eslint-disable-next-line no-console
+    console.log(
+      `[req] ${req.method} ${req.originalUrl} -> ${res.statusCode} ${ms}ms ${auth} origin=${origin}`
+    );
+  });
+  next();
+});
+
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
@@ -51,9 +71,39 @@ app.use('*', (req, res) => {
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
   console.error('Error caught by middleware:', err);
   console.error('Stack:', err.stack);
-  res.status(err.status || 500).json({ 
+
+  // Postgres `22P02 invalid input syntax for type uuid` (or similar text->type
+  // cast errors) happen when the client sends a local-first temp id like
+  // `lf-temp-…` into a column typed UUID. Surface this as a clear 400 instead
+  // of an opaque 500 so the client can re-sync and retry.
+  const pgCode = err?.parent?.code || err?.original?.code || err?.code;
+  if (pgCode === '22P02') {
+    res.status(400).json({
+      error:
+        'Invalid id format. This item is still syncing from this device — reopen it from the list, wait for sync to finish, then try again.',
+    });
+    return;
+  }
+
+  // Sequelize validation / unique-constraint errors → 400 / 409
+  if (err?.name === 'SequelizeValidationError') {
+    res.status(400).json({
+      error: 'Validation failed.',
+      details: (err.errors || []).map((e: any) => ({ field: e.path, message: e.message })),
+    });
+    return;
+  }
+  if (err?.name === 'SequelizeUniqueConstraintError') {
+    res.status(409).json({
+      error: 'A record with these unique fields already exists.',
+      details: (err.errors || []).map((e: any) => ({ field: e.path, message: e.message })),
+    });
+    return;
+  }
+
+  res.status(err.status || 500).json({
     error: err.message || 'Something went wrong!',
-    ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
+    ...(process.env.NODE_ENV === 'development' && { stack: err.stack }),
   });
 });
 

@@ -39,6 +39,11 @@ function shouldConvertOfficeToPdf(ext: string): boolean {
   return OFFICE_LIKE_EXTENSIONS.has(ext);
 }
 
+function keepLocalFileAfterCloudinaryUpload(): boolean {
+  const v = (process.env.KEEP_LOCAL_FILE_AFTER_CLOUDINARY_UPLOAD || '').trim().toLowerCase();
+  return v === 'true' || v === '1' || v === 'yes';
+}
+
 /** PostgreSQL UUID for `courses.id` / `course_files.id` — reject local-first `lf-temp-…` before Sequelize casts (avoids 500). */
 const ROW_UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -160,7 +165,7 @@ export const uploadFile = async (req: Request, res: Response) => {
         }
         return res.status(422).json({
           error:
-            'Document conversion failed. Install LibreOffice on the server (see backend Dockerfile) or upload a PDF.',
+            'Document conversion failed (e.g. .pptx → PDF needs LibreOffice). On your Mac run `brew install --cask libreoffice` and ensure `soffice` is on PATH, or deploy this API with Docker (see backend/Dockerfile). You can also upload a PDF directly.',
         });
       }
     } else {
@@ -182,10 +187,12 @@ export const uploadFile = async (req: Request, res: Response) => {
         });
         cloudinaryUrl = up.secureUrl;
         cloudinaryPublicId = up.publicId;
-        try {
-          fs.unlinkSync(finalPath);
-        } catch (unlinkErr) {
-          console.warn('Could not remove local file after Cloudinary upload:', unlinkErr);
+        if (!keepLocalFileAfterCloudinaryUpload()) {
+          try {
+            fs.unlinkSync(finalPath);
+          } catch (unlinkErr) {
+            console.warn('Could not remove local file after Cloudinary upload:', unlinkErr);
+          }
         }
       } catch (cloudErr) {
         console.error('Cloudinary upload failed; keeping local file:', cloudErr);
@@ -253,19 +260,26 @@ export const downloadFile = async (req: Request, res: Response) => {
     const fileRecord = await CourseFile.findOne({ where: { id: fileId, courseId, userId } });
     if (!fileRecord) return res.status(404).json({ error: 'File not found' });
 
+    const absolutePath = path.resolve(process.cwd(), fileRecord.storagePath);
+    // Prefer disk when the PDF still exists (dev, Cloudinary upload failed, or
+    // KEEP_LOCAL_FILE_AFTER_CLOUDINARY_UPLOAD). Avoids broken redirects when
+    // CLOUDINARY_URL is wrong (403) while the converted file is still on disk.
+    if (fs.existsSync(absolutePath)) {
+      const forceDownload = req.query.download === '1' || req.query.download === 'true';
+      res.setHeader('Content-Type', fileRecord.mimeType || 'application/octet-stream');
+      res.setHeader(
+        'Content-Disposition',
+        `${forceDownload ? 'attachment' : 'inline'}; filename="${encodeURIComponent(fileRecord.originalName)}"`
+      );
+      res.sendFile(absolutePath);
+      return;
+    }
+
     if (fileRecord.cloudinaryUrl) {
       return res.redirect(302, fileRecord.cloudinaryUrl);
     }
 
-    const absolutePath = path.resolve(process.cwd(), fileRecord.storagePath);
-    if (!fs.existsSync(absolutePath)) return res.status(404).json({ error: 'File not found on disk' });
-    const forceDownload = req.query.download === '1' || req.query.download === 'true';
-    res.setHeader('Content-Type', fileRecord.mimeType || 'application/octet-stream');
-    res.setHeader(
-      'Content-Disposition',
-      `${forceDownload ? 'attachment' : 'inline'}; filename="${encodeURIComponent(fileRecord.originalName)}"`
-    );
-    res.sendFile(absolutePath);
+    return res.status(404).json({ error: 'File not found on disk' });
   } catch (error) {
     console.error('Download file error:', error);
     res.status(500).json({ error: 'Failed to download file' });
