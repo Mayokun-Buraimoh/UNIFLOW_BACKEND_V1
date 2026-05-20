@@ -1,6 +1,6 @@
 # Backend production readiness
 
-Last audited against **https://uniflow-backend-mdo3.onrender.com/api** (live smoke tests).
+Last audited against **https://uniflow-backend-v1.onrender.com/api** (live smoke tests).
 
 ## Live status summary
 
@@ -48,7 +48,7 @@ Last audited against **https://uniflow-backend-mdo3.onrender.com/api** (live smo
 
    ```bash
    cd backend
-   API_BASE_URL=https://uniflow-backend-mdo3.onrender.com/api npm run test:apis
+   API_BASE_URL=https://uniflow-backend-v1.onrender.com/api npm run test:apis
    ```
 
    Must pass:

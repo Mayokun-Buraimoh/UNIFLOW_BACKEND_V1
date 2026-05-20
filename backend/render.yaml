@@ -6,7 +6,7 @@
 
 services:
   - type: web
-    name: uniflow-backend
+    name: uniflow-backend-v1
     runtime: docker
     region: oregon
     plan: starter

@@ -4,7 +4,7 @@
  * Usage: API_BASE_URL=https://your-api.onrender.com/api node scripts/check-production-remote.mjs
  */
 
-const BASE = (process.env.API_BASE_URL || 'https://uniflow-backend-mdo3.onrender.com/api').replace(/\/$/, '');
+const BASE = (process.env.API_BASE_URL || 'https://uniflow-backend-v1.onrender.com/api').replace(/\/$/, '');
 
 async function main() {
   console.log(`Probing ${BASE}\n`);
