@@ -90,6 +90,23 @@ export async function getDayOverview(
 
 export type ToolMutationFlags = { tasks: boolean; events: boolean };
 
+const RUBY_APP_TAB_PATHS: Record<string, { path: string; mode: 'root' | 'forward' }> = {
+  home: { path: '/home', mode: 'root' },
+  plans: { path: '/plans', mode: 'root' },
+  courses: { path: '/courses', mode: 'root' },
+  settings: { path: '/settings', mode: 'root' },
+  chatbot: { path: '/chatbot', mode: 'forward' },
+};
+
+export function rubyNavigateApp(tab: string): { ok: boolean; path?: string; mode?: 'root' | 'forward'; tab?: string; error?: string } {
+  const key = tab.trim().toLowerCase();
+  const target = RUBY_APP_TAB_PATHS[key];
+  if (!target) {
+    return { ok: false, error: `Unknown tab: ${tab}. Use home, plans, courses, settings, or chatbot.` };
+  }
+  return { ok: true, path: target.path, mode: target.mode, tab: key };
+}
+
 export async function rubyCreateTask(
   userId: string,
   input: {
@@ -466,6 +483,9 @@ export async function executeRubyTool(
       }
       case 'get_todays_classes': {
         return JSON.stringify(rubyGetTodaysClasses(session));
+      }
+      case 'navigate_app': {
+        return JSON.stringify(rubyNavigateApp(String(args.tab ?? '')));
       }
       default:
         return JSON.stringify({ ok: false, error: `Unknown tool: ${name}` });

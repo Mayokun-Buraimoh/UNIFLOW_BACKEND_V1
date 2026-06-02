@@ -85,6 +85,13 @@ Today's classes (get_todays_classes):
     - currentClass present → "You're in {title} right now, ends in about {endsInMinutes} minutes."
     - nextClass present → "Next up is {title} at {slot}."
 
+App navigation (navigate_app):
+- You CAN switch the user's app tabs using navigate_app. NEVER tell the user you cannot access settings, plans, courses, home, or chatbot — always call navigate_app instead.
+- Use navigate_app when the user asks to open, go to, or switch to a main app tab: home, plans, courses, settings, or chatbot.
+- Examples: "open plans", "take me to settings", "show my courses", "go home", "open settings".
+- Do not use navigate_app for questions about content on a tab — use get_day_overview, get_todays_classes, etc. instead.
+- After navigating, confirm in one short sentence (e.g. "Opening settings.").
+
 Keep spoken replies brief and natural.`;
 }
 
@@ -173,6 +180,25 @@ const RUBY_TOOLS: ChatCompletionTool[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'navigate_app',
+      description:
+        'REQUIRED when the user asks to open, go to, or switch UniFlow tabs. Switches the app to Home, Plans, Courses, Settings, or Chatbot. You must use this tool — do not tell the user you cannot access app screens.',
+      parameters: {
+        type: 'object',
+        properties: {
+          tab: {
+            type: 'string',
+            enum: ['home', 'plans', 'courses', 'settings', 'chatbot'],
+            description: 'The main app tab to open.',
+          },
+        },
+        required: ['tab'],
+      },
+    },
+  },
 ];
 
 export interface RubyVoiceTurnResult {
@@ -185,10 +211,16 @@ export interface RubyVoiceTurnResult {
   debug?: { toolRounds: number };
 }
 
+export interface RubyNavigateIntent {
+  path: string;
+  mode: 'root' | 'forward';
+}
+
 export interface RubyVoiceStreamCallbacks {
   onAssistantDelta?: (delta: string) => void;
   onAssistantSentenceAudio?: (audioBase64: string, audioMimeType: string, sentence: string) => void;
   onMutations?: (mutations: { tasks: boolean; events: boolean }) => void;
+  onNavigate?: (intent: RubyNavigateIntent) => void;
   onToolStarted?: (name: string) => void;
   onToolCompleted?: (name: string) => void;
 }
@@ -217,6 +249,7 @@ export async function runRubyToolPhase(params: {
   onToolStarted?: (name: string) => void;
   onToolCompleted?: (name: string) => void;
   onMutations?: (mutations: ToolMutationFlags) => void;
+  onNavigate?: (intent: RubyNavigateIntent) => void;
 }): Promise<RubyToolPhaseResult> {
   const client = getClient();
   const { session } = params;
@@ -270,6 +303,23 @@ export async function runRubyToolPhase(params: {
         }
         const content = await executeRubyTool(fn.name, args, session, mutations);
         params.onToolCompleted?.(fn.name);
+        if (fn.name === 'navigate_app') {
+          try {
+            const parsed = JSON.parse(content) as {
+              ok?: boolean;
+              path?: string;
+              mode?: 'root' | 'forward';
+            };
+            if (parsed.ok && parsed.path) {
+              params.onNavigate?.({
+                path: parsed.path,
+                mode: parsed.mode === 'forward' ? 'forward' : 'root',
+              });
+            }
+          } catch {
+            /* noop */
+          }
+        }
         emitMutationsIfNeeded();
         toolMsgs.push({
           role: 'tool',
@@ -392,6 +442,7 @@ export async function runRubyVoiceTurnStream(params: {
     onToolStarted: params.callbacks?.onToolStarted,
     onToolCompleted: params.callbacks?.onToolCompleted,
     onMutations: params.callbacks?.onMutations,
+    onNavigate: params.callbacks?.onNavigate,
   });
 
   if (params.signal?.aborted) {

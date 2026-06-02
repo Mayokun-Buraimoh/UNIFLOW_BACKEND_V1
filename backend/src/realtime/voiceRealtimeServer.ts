@@ -147,6 +147,15 @@ export function setupVoiceRealtimeServer(server: HttpServer): void {
           forcedTranscript: transcript,
           signal: turnAbort.signal,
           callbacks: {
+            onMutations: (mutations) => {
+              if (closed || turnAbort?.signal.aborted) return;
+              if (!mutations.tasks && !mutations.events) return;
+              sendJson(clientWs, { type: 'assistant.mutations', mutations });
+            },
+            onNavigate: (intent) => {
+              if (closed || turnAbort?.signal.aborted) return;
+              sendJson(clientWs, { type: 'app.navigate', path: intent.path, mode: intent.mode });
+            },
             onAssistantDelta: (delta) => {
               if (closed || turnAbort?.signal.aborted) return;
               runningAssistantText += delta;
