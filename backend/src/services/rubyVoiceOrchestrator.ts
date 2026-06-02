@@ -1,10 +1,6 @@
 import OpenAI from 'openai';
 import { toFile } from 'openai/uploads';
-import type {
-  ChatCompletionMessageParam,
-  ChatCompletionTool,
-  ChatCompletionToolMessageParam,
-} from 'openai/resources/chat/completions';
+import type { ChatCompletionTool, ChatCompletionToolMessageParam } from 'openai/resources/chat/completions';
 import { appendMessages, type RubySession } from './rubySessionStore';
 import { executeRubyTool, type ToolMutationFlags } from './rubyTaskEventTools';
 
@@ -192,6 +188,144 @@ export interface RubyVoiceTurnResult {
 export interface RubyVoiceStreamCallbacks {
   onAssistantDelta?: (delta: string) => void;
   onAssistantSentenceAudio?: (audioBase64: string, audioMimeType: string, sentence: string) => void;
+  onMutations?: (mutations: { tasks: boolean; events: boolean }) => void;
+  onToolStarted?: (name: string) => void;
+  onToolCompleted?: (name: string) => void;
+}
+
+export interface RubyToolPhaseResult {
+  replyText: string;
+  mutations: ToolMutationFlags;
+  toolRounds: number;
+}
+
+const MAX_TOOL_ITERATIONS = 8;
+
+function refreshRubySystemMessage(session: RubySession): void {
+  if (session.messages.length > 0 && session.messages[0]?.role === 'system') {
+    session.messages[0] = {
+      role: 'system',
+      content: buildRubySystemPrompt(session.firstName, session.timezone),
+    };
+  }
+}
+
+/** Non-streaming tool loop; returns final assistant text (not yet appended to session). */
+export async function runRubyToolPhase(params: {
+  session: RubySession;
+  signal?: AbortSignal;
+  onToolStarted?: (name: string) => void;
+  onToolCompleted?: (name: string) => void;
+  onMutations?: (mutations: ToolMutationFlags) => void;
+}): Promise<RubyToolPhaseResult> {
+  const client = getClient();
+  const { session } = params;
+  const mutations: ToolMutationFlags = { tasks: false, events: false };
+  let toolRounds = 0;
+
+  const emitMutationsIfNeeded = () => {
+    if (mutations.tasks || mutations.events) {
+      params.onMutations?.({ tasks: mutations.tasks, events: mutations.events });
+    }
+  };
+
+  for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
+    if (params.signal?.aborted) {
+      throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
+    }
+
+    const completion = await client.chat.completions.create({
+      model: CHAT_MODEL,
+      messages: session.messages,
+      tools: RUBY_TOOLS,
+      tool_choice: 'auto',
+      temperature: 0.5,
+    });
+
+    const msg = completion.choices[0]?.message;
+    if (!msg) break;
+
+    if (msg.tool_calls && msg.tool_calls.length > 0) {
+      toolRounds += 1;
+      appendMessages(session, [
+        {
+          role: 'assistant',
+          content: msg.content,
+          tool_calls: msg.tool_calls,
+        },
+      ]);
+
+      const toolMsgs: ChatCompletionToolMessageParam[] = [];
+      for (const tc of msg.tool_calls) {
+        if (params.signal?.aborted) {
+          throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
+        }
+        const fn = tc.function;
+        params.onToolStarted?.(fn.name);
+        let args: Record<string, unknown> = {};
+        try {
+          args = fn.arguments ? (JSON.parse(fn.arguments) as Record<string, unknown>) : {};
+        } catch {
+          args = {};
+        }
+        const content = await executeRubyTool(fn.name, args, session, mutations);
+        params.onToolCompleted?.(fn.name);
+        emitMutationsIfNeeded();
+        toolMsgs.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content,
+        });
+      }
+      appendMessages(session, toolMsgs);
+      continue;
+    }
+
+    const text = msg.content?.trim() || 'Okay.';
+    return { replyText: text, mutations, toolRounds };
+  }
+
+  return {
+    replyText: 'I ran into a loop processing that. Please try again.',
+    mutations,
+    toolRounds,
+  };
+}
+
+async function streamAssistantReplyTts(
+  client: OpenAI,
+  replyText: string,
+  callbacks: RubyVoiceStreamCallbacks | undefined,
+  signal?: AbortSignal
+): Promise<string> {
+  const text = replyText.trim() || 'Okay.';
+  let sentenceBuffer = text;
+  let emittedChars = 0;
+
+  const emitPartial = (nextEmitted: number) => {
+    if (nextEmitted <= emittedChars) return;
+    const slice = text.slice(emittedChars, nextEmitted);
+    emittedChars = nextEmitted;
+    callbacks?.onAssistantDelta?.(slice);
+  };
+
+  emitPartial(text.length);
+
+  const { complete, remainder } = splitCompleteSentences(sentenceBuffer);
+  sentenceBuffer = remainder;
+  for (const sentence of complete) {
+    if (signal?.aborted) break;
+    const { base64, mime } = await synthesizeSpeech(client, sentence);
+    callbacks?.onAssistantSentenceAudio?.(base64, mime, sentence);
+  }
+
+  const tail = sentenceBuffer.trim();
+  if (!signal?.aborted && tail) {
+    const { base64, mime } = await synthesizeSpeech(client, tail);
+    callbacks?.onAssistantSentenceAudio?.(base64, mime, tail);
+  }
+
+  return text;
 }
 
 async function transcribeAudio(
@@ -249,57 +383,35 @@ export async function runRubyVoiceTurnStream(params: {
   let transcript = (params.forcedTranscript || '').trim();
   if (!transcript) transcript = '(silence or unclear audio)';
 
-  if (session.messages.length > 0 && session.messages[0]?.role === 'system') {
-    session.messages[0] = {
-      role: 'system',
-      content: buildRubySystemPrompt(session.firstName, session.timezone),
-    };
-  }
-
+  refreshRubySystemMessage(session);
   appendMessages(session, [{ role: 'user', content: transcript }]);
 
-  const stream = await client.chat.completions.create({
-    model: CHAT_MODEL,
-    messages: session.messages,
-    temperature: 0.5,
-    stream: true,
+  const toolPhase = await runRubyToolPhase({
+    session,
+    signal: params.signal,
+    onToolStarted: params.callbacks?.onToolStarted,
+    onToolCompleted: params.callbacks?.onToolCompleted,
+    onMutations: params.callbacks?.onMutations,
   });
 
-  let fullText = '';
-  let sentenceBuffer = '';
-  for await (const part of stream) {
-    if (params.signal?.aborted) {
-      break;
-    }
-    const delta = part.choices[0]?.delta?.content || '';
-    if (!delta) continue;
-    fullText += delta;
-    sentenceBuffer += delta;
-    params.callbacks?.onAssistantDelta?.(delta);
-
-    const { complete, remainder } = splitCompleteSentences(sentenceBuffer);
-    sentenceBuffer = remainder;
-    for (const sentence of complete) {
-      if (params.signal?.aborted) break;
-      const { base64, mime } = await synthesizeSpeech(client, sentence);
-      params.callbacks?.onAssistantSentenceAudio?.(base64, mime, sentence);
-    }
+  if (params.signal?.aborted) {
+    throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
   }
 
-  const tail = sentenceBuffer.trim();
-  if (!params.signal?.aborted && tail) {
-    const { base64, mime } = await synthesizeSpeech(client, tail);
-    params.callbacks?.onAssistantSentenceAudio?.(base64, mime, tail);
-  }
+  const message = await streamAssistantReplyTts(
+    client,
+    toolPhase.replyText,
+    params.callbacks,
+    params.signal
+  );
 
-  const text = fullText.trim() || 'Okay.';
-  appendMessages(session, [{ role: 'assistant', content: text }]);
+  appendMessages(session, [{ role: 'assistant', content: message }]);
 
   return {
     transcript,
-    message: text,
+    message,
     sessionId: session.id,
-    mutations: { tasks: false, events: false },
+    mutations: { tasks: toolPhase.mutations.tasks, events: toolPhase.mutations.events },
   };
 }
 
@@ -332,91 +444,22 @@ export async function runRubyVoiceTurn(params: {
     transcript = '(silence or unclear audio)';
   }
 
-  // Refresh the date anchor on the system message before each turn so Ruby
-  // never resolves "today"/"tomorrow"/"next Friday" against a stale clock
-  // from when the session was first opened (sessions can outlive midnight).
-  if (session.messages.length > 0 && session.messages[0]?.role === 'system') {
-    session.messages[0] = {
-      role: 'system',
-      content: buildRubySystemPrompt(session.firstName, session.timezone),
-    };
-  }
+  refreshRubySystemMessage(session);
+  appendMessages(session, [{ role: 'user', content: transcript }]);
 
-  const userMessage: ChatCompletionMessageParam = { role: 'user', content: transcript };
-  appendMessages(session, [userMessage]);
+  const toolPhase = await runRubyToolPhase({ session });
+  const text = toolPhase.replyText;
+  appendMessages(session, [{ role: 'assistant', content: text }]);
+  const { base64, mime } = await synthesizeSpeech(client, text);
 
-  const mutations: ToolMutationFlags = { tasks: false, events: false };
-  let toolRounds = 0;
-  const maxToolIterations = 8;
-
-  for (let i = 0; i < maxToolIterations; i++) {
-    const completion = await client.chat.completions.create({
-      model: CHAT_MODEL,
-      messages: session.messages,
-      tools: RUBY_TOOLS,
-      tool_choice: 'auto',
-      temperature: 0.5,
-    });
-
-    const choice = completion.choices[0];
-    const msg = choice?.message;
-    if (!msg) break;
-
-    if (msg.tool_calls && msg.tool_calls.length > 0) {
-      toolRounds += 1;
-      const assistantToolMsg: ChatCompletionMessageParam = {
-        role: 'assistant',
-        content: msg.content,
-        tool_calls: msg.tool_calls,
-      };
-      appendMessages(session, [assistantToolMsg]);
-
-      const toolMsgs: ChatCompletionToolMessageParam[] = [];
-      for (const tc of msg.tool_calls) {
-        const fn = tc.function;
-        let args: Record<string, unknown> = {};
-        try {
-          args = fn.arguments ? (JSON.parse(fn.arguments) as Record<string, unknown>) : {};
-        } catch {
-          args = {};
-        }
-        const content = await executeRubyTool(fn.name, args, session, mutations);
-        toolMsgs.push({
-          role: 'tool',
-          tool_call_id: tc.id,
-          content,
-        });
-      }
-      appendMessages(session, toolMsgs);
-      continue;
-    }
-
-    const text = msg.content?.trim() || 'Okay.';
-    appendMessages(session, [{ role: 'assistant', content: text }]);
-    const { base64, mime } = await synthesizeSpeech(client, text);
-
-    return {
-      transcript,
-      message: text,
-      audioBase64: base64,
-      audioMimeType: mime,
-      sessionId: session.id,
-      mutations: { tasks: mutations.tasks, events: mutations.events },
-      ...(params.includeDebug ? { debug: { toolRounds } } : {}),
-    };
-  }
-
-  const fallback = 'I ran into a loop processing that. Please try again.';
-  appendMessages(session, [{ role: 'assistant', content: fallback }]);
-  const { base64, mime } = await synthesizeSpeech(client, fallback);
   return {
     transcript,
-    message: fallback,
+    message: text,
     audioBase64: base64,
     audioMimeType: mime,
     sessionId: session.id,
-    mutations: { tasks: mutations.tasks, events: mutations.events },
-    ...(params.includeDebug ? { debug: { toolRounds } } : {}),
+    mutations: { tasks: toolPhase.mutations.tasks, events: toolPhase.mutations.events },
+    ...(params.includeDebug ? { debug: { toolRounds: toolPhase.toolRounds } } : {}),
   };
 }
 
