@@ -9,13 +9,26 @@ interface AuthRequest extends Request {
   user?: any;
 }
 
+function extractBearerToken(authHeader?: string): string | null {
+  if (!authHeader) return null;
+  const [scheme, value] = authHeader.trim().split(/\s+/, 2);
+  if (!scheme || scheme.toLowerCase() !== 'bearer' || !value) return null;
+  return value.trim();
+}
+
+function looksLikeJwt(token: string): boolean {
+  return /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token);
+}
+
 export const authenticateToken = async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+    const token = extractBearerToken(req.headers['authorization']);
 
     if (!token) {
       return res.status(401).json({ error: 'Access token required' });
+    }
+    if (!looksLikeJwt(token)) {
+      return res.status(401).json({ error: 'Invalid token' });
     }
 
     // Verify token
@@ -33,8 +46,6 @@ export const authenticateToken = async (req: AuthRequest, res: Response, next: N
     
     next();
   } catch (error) {
-    console.error('Auth middleware error:', error);
-    
     if (error instanceof jwt.JsonWebTokenError) {
       return res.status(401).json({ error: 'Invalid token' });
     }
@@ -42,7 +53,7 @@ export const authenticateToken = async (req: AuthRequest, res: Response, next: N
     if (error instanceof jwt.TokenExpiredError) {
       return res.status(401).json({ error: 'Token expired' });
     }
-    
+    console.error('Auth middleware error:', error);
     return res.status(500).json({ error: 'Authentication failed' });
   }
 };
@@ -50,10 +61,9 @@ export const authenticateToken = async (req: AuthRequest, res: Response, next: N
 // Optional auth middleware (doesn't fail if no token)
 export const optionalAuth = async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
+    const token = extractBearerToken(req.headers['authorization']);
 
-    if (token) {
+    if (token && looksLikeJwt(token)) {
       const decoded = jwt.verify(token, JWT_SECRET) as any;
       const user = await User.findByPk(decoded.userId);
       
