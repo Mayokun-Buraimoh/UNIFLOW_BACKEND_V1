@@ -4,7 +4,7 @@ import jwt from 'jsonwebtoken';
 import type { IncomingMessage } from 'http';
 
 import { getRubySession, touchRubySession } from '../services/rubySessionStore';
-import { runRubyVoiceTurn } from '../services/rubyVoiceOrchestrator';
+import { runRubyVoiceTurnStream } from '../services/rubyVoiceOrchestrator';
 import { User } from '../models/User';
 
 type ClientInbound =
@@ -15,6 +15,7 @@ type ClientInbound =
       encoding?: string;
     }
   | { type: 'session.end'; session_id?: string }
+  | { type: 'assistant.interrupt'; session_id?: string }
   | { type: 'text.submit'; text?: string; session_id?: string };
 
 type DeepgramResultsEvent = {
@@ -102,6 +103,8 @@ export function setupVoiceRealtimeServer(server: HttpServer): void {
     let dgWs: WebSocket | null = null;
     let finalizedParts: string[] = [];
     let turnInFlight = false;
+    let queuedTurnText: string | null = null;
+    let turnAbort: AbortController | null = null;
     let closed = false;
 
     const setState = (state: RealtimeState) => {
@@ -121,7 +124,13 @@ export function setupVoiceRealtimeServer(server: HttpServer): void {
     const processTurnText = async (text: string) => {
       if (!sessionId) return;
       const transcript = text.trim();
-      if (!transcript || turnInFlight) return;
+      if (!transcript) return;
+      if (turnInFlight) {
+        queuedTurnText = transcript;
+        turnAbort?.abort();
+        sendJson(clientWs, { type: 'assistant.interrupted' });
+        return;
+      }
       const session = getRubySession(sessionId);
       if (!session) {
         sendJson(clientWs, { type: 'error', message: 'Invalid or expired voice session' });
@@ -129,31 +138,53 @@ export function setupVoiceRealtimeServer(server: HttpServer): void {
       }
 
       turnInFlight = true;
+      turnAbort = new AbortController();
       setState('processing');
+      let runningAssistantText = '';
       try {
-        const result = await runRubyVoiceTurn({
+        const result = await runRubyVoiceTurnStream({
           session,
           forcedTranscript: transcript,
-          includeDebug: process.env.NODE_ENV === 'development',
+          signal: turnAbort.signal,
+          callbacks: {
+            onAssistantDelta: (delta) => {
+              if (closed || turnAbort?.signal.aborted) return;
+              runningAssistantText += delta;
+              sendJson(clientWs, { type: 'assistant.partial', text: runningAssistantText });
+            },
+            onAssistantSentenceAudio: (audioBase64, audioMimeType) => {
+              if (closed || turnAbort?.signal.aborted) return;
+              setState('responding');
+              sendJson(clientWs, {
+                type: 'assistant.audio',
+                audioBase64,
+                audioMimeType,
+              });
+            },
+          },
         });
         if (closed) return;
+        if (turnAbort.signal.aborted) return;
 
         touchRubySession(session);
-        sendJson(clientWs, { type: 'assistant.partial', text: result.message });
         sendJson(clientWs, { type: 'assistant.final', text: result.message, mutations: result.mutations });
-        setState('responding');
-        sendJson(clientWs, {
-          type: 'assistant.audio',
-          audioBase64: result.audioBase64,
-          audioMimeType: result.audioMimeType,
-        });
         setState('listening');
       } catch (err) {
+        if (turnAbort?.signal.aborted) {
+          setState('listening');
+          return;
+        }
         const message = err instanceof Error ? err.message : 'Failed to process realtime voice turn';
         sendJson(clientWs, { type: 'error', message });
         setState('listening');
       } finally {
         turnInFlight = false;
+        turnAbort = null;
+        const queued = queuedTurnText;
+        queuedTurnText = null;
+        if (queued && !closed) {
+          void processTurnText(queued);
+        }
       }
     };
 
@@ -254,6 +285,14 @@ export function setupVoiceRealtimeServer(server: HttpServer): void {
         return;
       }
 
+      if (msg.type === 'assistant.interrupt') {
+        queuedTurnText = null;
+        turnAbort?.abort();
+        sendJson(clientWs, { type: 'assistant.interrupted' });
+        setState('listening');
+        return;
+      }
+
       if (msg.type === 'session.end') {
         closeDeepgram();
         setState('idle');
@@ -262,6 +301,7 @@ export function setupVoiceRealtimeServer(server: HttpServer): void {
 
     clientWs.on('close', () => {
       closed = true;
+      turnAbort?.abort();
       closeDeepgram();
     });
   });

@@ -189,6 +189,11 @@ export interface RubyVoiceTurnResult {
   debug?: { toolRounds: number };
 }
 
+export interface RubyVoiceStreamCallbacks {
+  onAssistantDelta?: (delta: string) => void;
+  onAssistantSentenceAudio?: (audioBase64: string, audioMimeType: string, sentence: string) => void;
+}
+
 async function transcribeAudio(
   client: OpenAI,
   buffer: Buffer,
@@ -213,6 +218,89 @@ async function synthesizeSpeech(client: OpenAI, text: string): Promise<{ base64:
   });
   const buf = Buffer.from(await response.arrayBuffer());
   return { base64: buf.toString('base64'), mime: 'audio/mpeg' };
+}
+
+function splitCompleteSentences(buffer: string): { complete: string[]; remainder: string } {
+  const complete: string[] = [];
+  let lastCut = 0;
+  const matcher = /[^.!?\n]+[.!?\n]+/g;
+  let match: RegExpExecArray | null;
+  while ((match = matcher.exec(buffer)) !== null) {
+    const sentence = match[0].trim();
+    if (sentence) complete.push(sentence);
+    lastCut = matcher.lastIndex;
+  }
+  return { complete, remainder: buffer.slice(lastCut) };
+}
+
+export async function runRubyVoiceTurnStream(params: {
+  session: RubySession;
+  forcedTranscript: string;
+  callbacks?: RubyVoiceStreamCallbacks;
+  signal?: AbortSignal;
+}): Promise<{
+  transcript: string;
+  message: string;
+  sessionId: string;
+  mutations: { tasks: boolean; events: boolean };
+}> {
+  const client = getClient();
+  const { session } = params;
+  let transcript = (params.forcedTranscript || '').trim();
+  if (!transcript) transcript = '(silence or unclear audio)';
+
+  if (session.messages.length > 0 && session.messages[0]?.role === 'system') {
+    session.messages[0] = {
+      role: 'system',
+      content: buildRubySystemPrompt(session.firstName, session.timezone),
+    };
+  }
+
+  appendMessages(session, [{ role: 'user', content: transcript }]);
+
+  const stream = await client.chat.completions.create({
+    model: CHAT_MODEL,
+    messages: session.messages,
+    temperature: 0.5,
+    stream: true,
+  });
+
+  let fullText = '';
+  let sentenceBuffer = '';
+  for await (const part of stream) {
+    if (params.signal?.aborted) {
+      break;
+    }
+    const delta = part.choices[0]?.delta?.content || '';
+    if (!delta) continue;
+    fullText += delta;
+    sentenceBuffer += delta;
+    params.callbacks?.onAssistantDelta?.(delta);
+
+    const { complete, remainder } = splitCompleteSentences(sentenceBuffer);
+    sentenceBuffer = remainder;
+    for (const sentence of complete) {
+      if (params.signal?.aborted) break;
+      const { base64, mime } = await synthesizeSpeech(client, sentence);
+      params.callbacks?.onAssistantSentenceAudio?.(base64, mime, sentence);
+    }
+  }
+
+  const tail = sentenceBuffer.trim();
+  if (!params.signal?.aborted && tail) {
+    const { base64, mime } = await synthesizeSpeech(client, tail);
+    params.callbacks?.onAssistantSentenceAudio?.(base64, mime, tail);
+  }
+
+  const text = fullText.trim() || 'Okay.';
+  appendMessages(session, [{ role: 'assistant', content: text }]);
+
+  return {
+    transcript,
+    message: text,
+    sessionId: session.id,
+    mutations: { tasks: false, events: false },
+  };
 }
 
 export async function runRubyVoiceTurn(params: {
