@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
+import { createServer } from 'http';
 import { sequelize } from './config/database';
 import taskRoutes from './routes/task';
 import authRoutes from './routes/auth';
@@ -12,6 +13,7 @@ import eventRoutes from './routes/event';
 import pushTokenRoutes from './routes/pushToken';
 import internalRoutes from './routes/internal';
 import voiceRoutes from './routes/voice';
+import { setupVoiceRealtimeServer } from './realtime/voiceRealtimeServer';
 import './models'; // Import models to establish associations
 
 const app = express();
@@ -135,9 +137,12 @@ async function startServer() {
     await sequelize.sync({ alter: syncAlter });
     console.log(`Database synchronized successfully (alter=${syncAlter}).`);
     
-    app.listen(PORT, () => {
+    const httpServer = createServer(app);
+    setupVoiceRealtimeServer(httpServer);
+    httpServer.listen(PORT, () => {
       console.log(`UniFlow Backend server is running on port ${PORT}`);
       console.log(`Health check: http://localhost:${PORT}/api/health`);
+      console.log(`Realtime voice WS: ws://localhost:${PORT}/api/voice/realtime`);
     });
   } catch (error) {
     console.error('Unable to start server:', error);

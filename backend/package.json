@@ -40,13 +40,15 @@
     "mysql2": "^3.6.5",
     "openai": "^4.104.0",
     "pg": "^8.16.3",
-    "sequelize": "^6.35.0"
+    "sequelize": "^6.35.0",
+    "ws": "^8.21.0"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
     "@types/multer": "^2.1.0",
     "@types/node": "^20.19.37",
+    "@types/ws": "^8.18.1",
     "sequelize-cli": "^6.6.2",
     "ts-node": "^10.9.1",
     "typescript": "^5.3.2"
