@@ -1,5 +1,23 @@
 import { Task } from '../models/Task';
 import { Event } from '../models/Event';
+import { WeeklySchedule } from '../models/WeeklySchedule';
+import {
+  rubyCreateCourse,
+  rubyCreatePlan,
+  rubyDeleteEvent,
+  rubyDeletePlan,
+  rubyDeleteTask,
+  rubyGetCourse,
+  rubyGetPlan,
+  rubyGetWeeklySchedule,
+  rubyListCourses,
+  rubyListPlans,
+  rubyNavigateTo,
+  rubyToggleTask,
+  rubyUpdateEvent,
+  rubyUpdatePlan,
+  rubyUpdateWeeklySchedule,
+} from './rubyAppTools';
 import { scheduleEventReminderForEvent } from './eventReminderScheduler';
 import type {
   RubySession,
@@ -88,7 +106,17 @@ export async function getDayOverview(
   };
 }
 
-export type ToolMutationFlags = { tasks: boolean; events: boolean };
+export type ToolMutationFlags = {
+  tasks: boolean;
+  events: boolean;
+  plans: boolean;
+  courses: boolean;
+  schedule: boolean;
+};
+
+export function emptyMutationFlags(): ToolMutationFlags {
+  return { tasks: false, events: false, plans: false, courses: false, schedule: false };
+}
 
 const RUBY_APP_TAB_PATHS: Record<string, { path: string; mode: 'root' | 'forward' }> = {
   home: { path: '/home', mode: 'root' },
@@ -323,21 +351,47 @@ export interface TodaysClassesResult {
 }
 
 /**
- * Compute "today's classes" using the weekly-schedule snapshot the client
- * shipped at session start (or via `refresh_schedule`). Returns a structured
- * payload Ruby can use to answer "how many classes do I have today?",
- * "how many are left?", "what's my next class?", etc.
+ * Compute "today's classes" using the user's weekly schedule from the database.
  */
-export function rubyGetTodaysClasses(
+export async function rubyGetTodaysClasses(
   session: RubySession
-):
+): Promise<
   | TodaysClassesResult
-  | { ok: false; error: 'no_schedule_provided'; hasSchedule: false } {
-  const snapshot: WeeklyScheduleSnapshot | undefined = session.weeklySchedule;
-  if (!snapshot) {
+  | { ok: false; error: 'no_schedule_provided'; hasSchedule: false }
+> {
+  const ws = await WeeklySchedule.findOne({ where: { userId: session.userId } });
+  if (!ws?.data || typeof ws.data !== 'object') {
     return { ok: false, error: 'no_schedule_provided', hasSchedule: false };
   }
 
+  const data = ws.data as Record<string, string[]>;
+  const maxLen = Math.max(0, ...Object.values(data).map((rows) => (Array.isArray(rows) ? rows.length : 0)));
+  const timeSlots = Array.from({ length: maxLen }, (_, i) => {
+    const h = 8 + i * 2;
+    return `${String(h).padStart(2, '0')}:00 - ${String(h + 2).padStart(2, '0')}:00`;
+  });
+  const snapshot: WeeklyScheduleSnapshot = {
+    grid: {
+      Mon: data.Mon || [],
+      Tue: data.Tue || [],
+      Wed: data.Wed || [],
+      Thur: data.Thur || [],
+      Fri: data.Fri || [],
+      Sat: data.Sat || [],
+      Sun: data.Sun || [],
+    },
+    timeSlots,
+    venues: { Mon: [], Tue: [], Wed: [], Thur: [], Fri: [], Sat: [], Sun: [] },
+    capturedAt: new Date().toISOString(),
+  };
+
+  return computeTodaysClassesFromSnapshot(session, snapshot);
+}
+
+function computeTodaysClassesFromSnapshot(
+  session: RubySession,
+  snapshot: WeeklyScheduleSnapshot
+): TodaysClassesResult {
   const tz = session.timezone || 'UTC';
   const weekdayKey = todayWeekdayKey(tz);
   const weekdayName = new Intl.DateTimeFormat('en-US', { timeZone: tz, weekday: 'long' }).format(new Date());
@@ -482,10 +536,100 @@ export async function executeRubyTool(
         return JSON.stringify(r);
       }
       case 'get_todays_classes': {
-        return JSON.stringify(rubyGetTodaysClasses(session));
+        return JSON.stringify(await rubyGetTodaysClasses(session));
       }
+      case 'navigate_to':
       case 'navigate_app': {
-        return JSON.stringify(rubyNavigateApp(String(args.tab ?? '')));
+        return JSON.stringify(
+          await rubyNavigateTo(userId, {
+            screen: String(args.screen ?? args.tab ?? ''),
+            planId: args.planId != null ? String(args.planId) : undefined,
+            courseId: args.courseId != null ? String(args.courseId) : undefined,
+          })
+        );
+      }
+      case 'list_plans': {
+        return JSON.stringify(await rubyListPlans(userId));
+      }
+      case 'get_plan': {
+        return JSON.stringify(await rubyGetPlan(userId, String(args.planId ?? '')));
+      }
+      case 'create_plan': {
+        return JSON.stringify(
+          await rubyCreatePlan(
+            userId,
+            { title: String(args.title ?? ''), isCustom: args.isCustom !== false },
+            mutations
+          )
+        );
+      }
+      case 'update_plan': {
+        return JSON.stringify(
+          await rubyUpdatePlan(
+            userId,
+            {
+              planId: String(args.planId ?? ''),
+              title: args.title != null ? String(args.title) : undefined,
+              targets: args.targets,
+              tasks: args.tasks,
+            },
+            mutations
+          )
+        );
+      }
+      case 'delete_plan': {
+        return JSON.stringify(await rubyDeletePlan(userId, String(args.planId ?? ''), mutations));
+      }
+      case 'list_courses': {
+        return JSON.stringify(await rubyListCourses(userId));
+      }
+      case 'get_course': {
+        return JSON.stringify(await rubyGetCourse(userId, String(args.courseId ?? '')));
+      }
+      case 'create_course': {
+        return JSON.stringify(
+          await rubyCreateCourse(
+            userId,
+            {
+              name: String(args.name ?? ''),
+              code: args.code != null ? String(args.code) : undefined,
+              color: args.color != null ? String(args.color) : undefined,
+            },
+            mutations
+          )
+        );
+      }
+      case 'get_weekly_schedule': {
+        return JSON.stringify(await rubyGetWeeklySchedule(userId));
+      }
+      case 'update_weekly_schedule': {
+        return JSON.stringify(
+          await rubyUpdateWeeklySchedule(userId, (args.data as Record<string, unknown>) || {}, mutations)
+        );
+      }
+      case 'delete_task': {
+        return JSON.stringify(await rubyDeleteTask(userId, String(args.taskId ?? ''), mutations));
+      }
+      case 'toggle_task': {
+        return JSON.stringify(await rubyToggleTask(userId, String(args.taskId ?? ''), mutations));
+      }
+      case 'update_event': {
+        return JSON.stringify(
+          await rubyUpdateEvent(
+            userId,
+            {
+              eventId: String(args.eventId ?? ''),
+              title: args.title != null ? String(args.title) : undefined,
+              time: args.time != null ? String(args.time) : undefined,
+              date: args.date != null ? String(args.date) : undefined,
+              priority: args.priority != null ? String(args.priority) : undefined,
+            },
+            mutations
+          )
+        );
+      }
+      case 'delete_event': {
+        return JSON.stringify(await rubyDeleteEvent(userId, String(args.eventId ?? ''), mutations));
       }
       default:
         return JSON.stringify({ ok: false, error: `Unknown tool: ${name}` });

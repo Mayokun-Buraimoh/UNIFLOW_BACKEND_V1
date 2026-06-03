@@ -4,6 +4,7 @@ import { Profile } from './profile'
 import { Task } from './Task'
 import { WeeklySchedule } from './WeeklySchedule'
 import { Course } from './Course'
+import { Plan } from './Plan'
 import { MoodleConnection } from './MoodleConnection'
 import { Event } from './Event'
 import { DevicePushToken } from './DevicePushToken'
@@ -19,6 +20,9 @@ Task.belongsTo(User, { foreignKey: 'userId', as: 'user' });
 
 User.hasOne(WeeklySchedule, { foreignKey: 'userId', as: 'weeklySchedule', onDelete: 'CASCADE', hooks: true });
 WeeklySchedule.belongsTo(User, { foreignKey: 'userId', as: 'user' });
+
+User.hasMany(Plan, { foreignKey: 'userId', as: 'plans' });
+Plan.belongsTo(User, { foreignKey: 'userId', as: 'user' });
 
 User.hasMany(Course, { foreignKey: 'userId', as: 'courses' });
 Course.belongsTo(User, { foreignKey: 'userId', as: 'user' });
@@ -46,4 +50,4 @@ User.hasMany(DevicePushToken, { foreignKey: 'userId', as: 'devicePushTokens' });
 DevicePushToken.belongsTo(User, { foreignKey: 'userId', as: 'user' });
 
 // Export all models
-export { User, Profile, Task, WeeklySchedule, Course, MoodleConnection, Event, DevicePushToken }
+export { User, Profile, Task, WeeklySchedule, Course, Plan, MoodleConnection, Event, DevicePushToken }

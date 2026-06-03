@@ -3,6 +3,7 @@ import { WebSocketServer, WebSocket, type RawData } from 'ws';
 import jwt from 'jsonwebtoken';
 import type { IncomingMessage } from 'http';
 
+import { hasAnyMutation } from '../services/rubyAppTools';
 import { getRubySession, touchRubySession } from '../services/rubySessionStore';
 import { runRubyVoiceTurnStream } from '../services/rubyVoiceOrchestrator';
 import { User } from '../models/User';
@@ -149,7 +150,7 @@ export function setupVoiceRealtimeServer(server: HttpServer): void {
           callbacks: {
             onMutations: (mutations) => {
               if (closed || turnAbort?.signal.aborted) return;
-              if (!mutations.tasks && !mutations.events) return;
+              if (!hasAnyMutation(mutations)) return;
               sendJson(clientWs, { type: 'assistant.mutations', mutations });
             },
             onNavigate: (intent) => {

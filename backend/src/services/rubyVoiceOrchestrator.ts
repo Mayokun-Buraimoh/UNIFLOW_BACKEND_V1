@@ -2,7 +2,17 @@ import OpenAI from 'openai';
 import { toFile } from 'openai/uploads';
 import type { ChatCompletionTool, ChatCompletionToolMessageParam } from 'openai/resources/chat/completions';
 import { appendMessages, type RubySession } from './rubySessionStore';
-import { executeRubyTool, type ToolMutationFlags } from './rubyTaskEventTools';
+import {
+  emptyMutationFlags,
+  executeRubyTool,
+  type ToolMutationFlags,
+} from './rubyTaskEventTools';
+import {
+  hasAnyMutation,
+  isNavigateTool,
+  parseNavigateResult,
+  type RubyNavigateIntent,
+} from './rubyAppTools';
 
 const TRANSCRIBE_MODEL = process.env.OPENAI_TRANSCRIBE_MODEL || 'whisper-1';
 const CHAT_MODEL = process.env.OPENAI_CHAT_MODEL || 'gpt-4o-mini';
@@ -85,12 +95,17 @@ Today's classes (get_todays_classes):
     - currentClass present → "You're in {title} right now, ends in about {endsInMinutes} minutes."
     - nextClass present → "Next up is {title} at {slot}."
 
-App navigation (navigate_app):
-- You CAN switch the user's app tabs using navigate_app. NEVER tell the user you cannot access settings, plans, courses, home, or chatbot — always call navigate_app instead.
-- Use navigate_app when the user asks to open, go to, or switch to a main app tab: home, plans, courses, settings, or chatbot.
-- Examples: "open plans", "take me to settings", "show my courses", "go home", "open settings".
-- Do not use navigate_app for questions about content on a tab — use get_day_overview, get_todays_classes, etc. instead.
-- After navigating, confirm in one short sentence (e.g. "Opening settings.").
+App navigation (navigate_to):
+- You CAN navigate the UniFlow app using navigate_to. NEVER say you cannot access settings, plans, courses, or other screens.
+- Use navigate_to for tabs: home, plans, courses, settings, chatbot, weekly_schedule, analytics, profile.
+- To open a specific plan or course: call list_plans or list_courses first to resolve the id, then navigate_to with screen=plan or screen=course.
+- Do not use navigate_to for content questions — use get_day_overview, list_plans, get_weekly_schedule, etc.
+
+Plans, courses, and schedule:
+- Use list_plans / get_plan / create_plan / update_plan for plans. Use list_courses / get_course / create_course for courses.
+- Use get_weekly_schedule and update_weekly_schedule for the weekly class grid (server is source of truth).
+- Always call tools before claiming an action succeeded. Never invent ids — list first, then act.
+- For destructive actions (delete_plan, delete_task, delete_event), confirm once if the user was not explicit.
 
 Keep spoken replies brief and natural.`;
 }
@@ -173,7 +188,7 @@ const RUBY_TOOLS: ChatCompletionTool[] = [
     function: {
       name: 'get_todays_classes',
       description:
-        "Return the user's classes for today from their on-device weekly schedule snapshot. Use this for any question about today's lectures/classes (e.g. 'how many classes do I have today?', 'how many have I gone to?', 'how many are left?', 'what's next?'). Returns total/finished/in_progress/upcoming counts plus each class with status and time slot. If hasSchedule=false the user hasn't set up a weekly schedule yet — tell them to set one up in the Schedule tab.",
+        "Return the user's classes for today from their weekly schedule in the database. Use for questions about today's lectures/classes.",
       parameters: {
         type: 'object',
         properties: {},
@@ -183,20 +198,152 @@ const RUBY_TOOLS: ChatCompletionTool[] = [
   {
     type: 'function',
     function: {
-      name: 'navigate_app',
+      name: 'navigate_to',
       description:
-        'REQUIRED when the user asks to open, go to, or switch UniFlow tabs. Switches the app to Home, Plans, Courses, Settings, or Chatbot. You must use this tool — do not tell the user you cannot access app screens.',
+        'Navigate the UniFlow app. Use for tabs or deep links to a plan or course. Call list_plans/list_courses first to resolve ids by name.',
       parameters: {
         type: 'object',
         properties: {
-          tab: {
+          screen: {
             type: 'string',
-            enum: ['home', 'plans', 'courses', 'settings', 'chatbot'],
-            description: 'The main app tab to open.',
+            enum: ['home', 'plans', 'courses', 'settings', 'chatbot', 'weekly_schedule', 'analytics', 'profile', 'plan', 'course'],
           },
+          planId: { type: 'string', description: 'Required when screen is plan' },
+          courseId: { type: 'string', description: 'Required when screen is course' },
         },
-        required: ['tab'],
+        required: ['screen'],
       },
+    },
+  },
+  {
+    type: 'function',
+    function: { name: 'list_plans', description: 'List the user plans (id, title, progress).', parameters: { type: 'object', properties: {} } },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_plan',
+      description: 'Get full plan details by id.',
+      parameters: { type: 'object', properties: { planId: { type: 'string' } }, required: ['planId'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'create_plan',
+      description: 'Create a new plan.',
+      parameters: {
+        type: 'object',
+        properties: { title: { type: 'string' }, isCustom: { type: 'boolean' } },
+        required: ['title'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'update_plan',
+      description: 'Update plan title, targets, or tasks.',
+      parameters: {
+        type: 'object',
+        properties: {
+          planId: { type: 'string' },
+          title: { type: 'string' },
+          targets: { type: 'array', items: { type: 'object' } },
+          tasks: { type: 'array', items: { type: 'object' } },
+        },
+        required: ['planId'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'delete_plan',
+      description: 'Delete a plan by id. Confirm with user if not explicit.',
+      parameters: { type: 'object', properties: { planId: { type: 'string' } }, required: ['planId'] },
+    },
+  },
+  {
+    type: 'function',
+    function: { name: 'list_courses', description: 'List user courses.', parameters: { type: 'object', properties: {} } },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_course',
+      description: 'Get course summary by id.',
+      parameters: { type: 'object', properties: { courseId: { type: 'string' } }, required: ['courseId'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'create_course',
+      description: 'Create a course folder.',
+      parameters: {
+        type: 'object',
+        properties: { name: { type: 'string' }, code: { type: 'string' }, color: { type: 'string' } },
+        required: ['name'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: { name: 'get_weekly_schedule', description: 'Get weekly class schedule grid from server.', parameters: { type: 'object', properties: {} } },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'update_weekly_schedule',
+      description: 'Replace weekly schedule grid. Keys: Mon, Tue, Wed, Thur, Fri, etc. Values: string arrays.',
+      parameters: {
+        type: 'object',
+        properties: { data: { type: 'object', description: 'Day -> class name arrays' } },
+        required: ['data'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'toggle_task',
+      description: 'Toggle task completed/pending by id.',
+      parameters: { type: 'object', properties: { taskId: { type: 'string' } }, required: ['taskId'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'delete_task',
+      description: 'Delete a task by id.',
+      parameters: { type: 'object', properties: { taskId: { type: 'string' } }, required: ['taskId'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'update_event',
+      description: 'Update calendar event fields.',
+      parameters: {
+        type: 'object',
+        properties: {
+          eventId: { type: 'string' },
+          title: { type: 'string' },
+          time: { type: 'string' },
+          date: { type: 'string' },
+          priority: { type: 'string', enum: ['low', 'medium', 'critical'] },
+        },
+        required: ['eventId'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'delete_event',
+      description: 'Delete calendar event by id.',
+      parameters: { type: 'object', properties: { eventId: { type: 'string' } }, required: ['eventId'] },
     },
   },
 ];
@@ -207,19 +354,14 @@ export interface RubyVoiceTurnResult {
   audioBase64: string;
   audioMimeType: string;
   sessionId: string;
-  mutations: { tasks: boolean; events: boolean };
+  mutations: ToolMutationFlags;
   debug?: { toolRounds: number };
-}
-
-export interface RubyNavigateIntent {
-  path: string;
-  mode: 'root' | 'forward';
 }
 
 export interface RubyVoiceStreamCallbacks {
   onAssistantDelta?: (delta: string) => void;
   onAssistantSentenceAudio?: (audioBase64: string, audioMimeType: string, sentence: string) => void;
-  onMutations?: (mutations: { tasks: boolean; events: boolean }) => void;
+  onMutations?: (mutations: ToolMutationFlags) => void;
   onNavigate?: (intent: RubyNavigateIntent) => void;
   onToolStarted?: (name: string) => void;
   onToolCompleted?: (name: string) => void;
@@ -253,12 +395,12 @@ export async function runRubyToolPhase(params: {
 }): Promise<RubyToolPhaseResult> {
   const client = getClient();
   const { session } = params;
-  const mutations: ToolMutationFlags = { tasks: false, events: false };
+  const mutations: ToolMutationFlags = emptyMutationFlags();
   let toolRounds = 0;
 
   const emitMutationsIfNeeded = () => {
-    if (mutations.tasks || mutations.events) {
-      params.onMutations?.({ tasks: mutations.tasks, events: mutations.events });
+    if (hasAnyMutation(mutations)) {
+      params.onMutations?.({ ...mutations });
     }
   };
 
@@ -303,22 +445,9 @@ export async function runRubyToolPhase(params: {
         }
         const content = await executeRubyTool(fn.name, args, session, mutations);
         params.onToolCompleted?.(fn.name);
-        if (fn.name === 'navigate_app') {
-          try {
-            const parsed = JSON.parse(content) as {
-              ok?: boolean;
-              path?: string;
-              mode?: 'root' | 'forward';
-            };
-            if (parsed.ok && parsed.path) {
-              params.onNavigate?.({
-                path: parsed.path,
-                mode: parsed.mode === 'forward' ? 'forward' : 'root',
-              });
-            }
-          } catch {
-            /* noop */
-          }
+        if (isNavigateTool(fn.name)) {
+          const intent = parseNavigateResult(content);
+          if (intent) params.onNavigate?.(intent);
         }
         emitMutationsIfNeeded();
         toolMsgs.push({
@@ -426,7 +555,7 @@ export async function runRubyVoiceTurnStream(params: {
   transcript: string;
   message: string;
   sessionId: string;
-  mutations: { tasks: boolean; events: boolean };
+  mutations: ToolMutationFlags;
 }> {
   const client = getClient();
   const { session } = params;
@@ -462,7 +591,13 @@ export async function runRubyVoiceTurnStream(params: {
     transcript,
     message,
     sessionId: session.id,
-    mutations: { tasks: toolPhase.mutations.tasks, events: toolPhase.mutations.events },
+    mutations: {
+      tasks: toolPhase.mutations.tasks,
+      events: toolPhase.mutations.events,
+      plans: toolPhase.mutations.plans,
+      courses: toolPhase.mutations.courses,
+      schedule: toolPhase.mutations.schedule,
+    },
   };
 }
 
@@ -509,7 +644,13 @@ export async function runRubyVoiceTurn(params: {
     audioBase64: base64,
     audioMimeType: mime,
     sessionId: session.id,
-    mutations: { tasks: toolPhase.mutations.tasks, events: toolPhase.mutations.events },
+    mutations: {
+      tasks: toolPhase.mutations.tasks,
+      events: toolPhase.mutations.events,
+      plans: toolPhase.mutations.plans,
+      courses: toolPhase.mutations.courses,
+      schedule: toolPhase.mutations.schedule,
+    },
     ...(params.includeDebug ? { debug: { toolRounds: toolPhase.toolRounds } } : {}),
   };
 }

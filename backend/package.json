@@ -15,7 +15,8 @@
     "view-db": "ts-node view-database.ts",
     "backfill:cloudinary:dry": "ts-node scripts/backfill-cloudinary-course-files.ts --dry-run",
     "backfill:cloudinary": "ts-node scripts/backfill-cloudinary-course-files.ts",
-    "test:apis": "node scripts/test-all-apis.mjs",
+    "test:ruby-tools": "ts-node scripts/test-ruby-tools.ts",
+    "test:phaseb": "node scripts/test-plans-phaseb.mjs",
     "check:google": "node scripts/check-google-auth.mjs",
     "check:production": "node scripts/check-production-remote.mjs"
   },

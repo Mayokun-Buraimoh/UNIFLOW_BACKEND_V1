@@ -12,6 +12,7 @@ import courseRoutes from './routes/course';
 import eventRoutes from './routes/event';
 import pushTokenRoutes from './routes/pushToken';
 import internalRoutes from './routes/internal';
+import planRoutes from './routes/plan';
 import voiceRoutes from './routes/voice';
 import { setupVoiceRealtimeServer } from './realtime/voiceRealtimeServer';
 import './models'; // Import models to establish associations
@@ -55,6 +56,7 @@ app.use('/api/tasks', taskRoutes);
 app.use('/api/schedule', scheduleRoutes);
 app.use('/api/courses', courseRoutes);
 app.use('/api/events', eventRoutes);
+app.use('/api/plans', planRoutes);
 app.use('/api/push-tokens', pushTokenRoutes);
 app.use('/api/internal', internalRoutes);
 app.use('/api/voice', voiceRoutes);
