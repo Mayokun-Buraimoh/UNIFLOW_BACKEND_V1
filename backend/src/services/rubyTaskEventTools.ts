@@ -19,6 +19,8 @@ import {
   rubyUpdateWeeklySchedule,
 } from './rubyAppTools';
 import { scheduleEventReminderForEvent } from './eventReminderScheduler';
+import { confirmExamPrep, proposeExamPrep } from './examPrepService';
+import { rubyListCourseFiles, rubyStartFocusSession } from './rubyFocusTools';
 import type {
   RubySession,
   WeeklyScheduleDayKey,
@@ -545,6 +547,7 @@ export async function executeRubyTool(
             screen: String(args.screen ?? args.tab ?? ''),
             planId: args.planId != null ? String(args.planId) : undefined,
             courseId: args.courseId != null ? String(args.courseId) : undefined,
+            noteId: args.noteId != null ? String(args.noteId) : undefined,
           })
         );
       }
@@ -630,6 +633,52 @@ export async function executeRubyTool(
       }
       case 'delete_event': {
         return JSON.stringify(await rubyDeleteEvent(userId, String(args.eventId ?? ''), mutations));
+      }
+      case 'list_course_files': {
+        return JSON.stringify(await rubyListCourseFiles(userId, String(args.courseId ?? '')));
+      }
+      case 'start_focus_session': {
+        return JSON.stringify(
+          await rubyStartFocusSession(userId, {
+            courseId: args.courseId != null ? String(args.courseId) : undefined,
+            subject: args.subject != null ? String(args.subject) : undefined,
+            noteId: args.noteId != null ? String(args.noteId) : undefined,
+            fileName: args.fileName != null ? String(args.fileName) : undefined,
+            durationMinutes: args.durationMinutes != null ? Number(args.durationMinutes) : undefined,
+            technique: args.technique != null ? String(args.technique) : undefined,
+            dndEnabled: args.dndEnabled !== false,
+          })
+        );
+      }
+      case 'propose_exam_prep': {
+        return JSON.stringify(
+          await proposeExamPrep(session, {
+            subject: String(args.subject ?? ''),
+            testDate: String(args.testDate ?? ''),
+            testTime: args.testTime != null ? String(args.testTime) : undefined,
+            courseName: args.courseName != null ? String(args.courseName) : undefined,
+            includeFocusSessions: args.includeFocusSessions !== false,
+            focusDurationMinutes:
+              args.focusDurationMinutes != null ? Number(args.focusDurationMinutes) : undefined,
+          })
+        );
+      }
+      case 'confirm_exam_prep': {
+        return JSON.stringify(
+          await confirmExamPrep(
+            session,
+            {
+              confirmed: args.confirmed === true,
+              startFocusNow: args.startFocusNow === true,
+              noteId: args.noteId != null ? String(args.noteId) : undefined,
+              fileName: args.fileName != null ? String(args.fileName) : undefined,
+              focusDurationMinutes:
+                args.focusDurationMinutes != null ? Number(args.focusDurationMinutes) : undefined,
+              technique: args.technique != null ? String(args.technique) : undefined,
+            },
+            mutations
+          )
+        );
       }
       default:
         return JSON.stringify({ ok: false, error: `Unknown tool: ${name}` });

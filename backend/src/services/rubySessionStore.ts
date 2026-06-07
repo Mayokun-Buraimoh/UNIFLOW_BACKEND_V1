@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto';
 import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions';
+import type { ExamPrepProposal } from './examPrepTypes';
 
 const TTL_MS = 30 * 60 * 1000;
 
@@ -37,6 +38,7 @@ export interface RubySession {
   firstName: string;
   messages: ChatCompletionMessageParam[];
   weeklySchedule?: WeeklyScheduleSnapshot;
+  pendingExamPrep?: ExamPrepProposal;
   updatedAt: number;
 }
 
@@ -101,5 +103,22 @@ export function deleteRubySession(sessionId: string): void {
 
 export function appendMessages(session: RubySession, msgs: ChatCompletionMessageParam[]): void {
   session.messages.push(...msgs);
+  touchRubySession(session);
+}
+
+export function setSessionExamPrepProposal(
+  session: RubySession,
+  proposal: ExamPrepProposal | undefined
+): void {
+  session.pendingExamPrep = proposal;
+  touchRubySession(session);
+}
+
+export function getSessionExamPrepProposal(session: RubySession): ExamPrepProposal | undefined {
+  return session.pendingExamPrep;
+}
+
+export function clearSessionExamPrepProposal(session: RubySession): void {
+  session.pendingExamPrep = undefined;
   touchRubySession(session);
 }

@@ -13,6 +13,7 @@ import {
   parseNavigateResult,
   type RubyNavigateIntent,
 } from './rubyAppTools';
+import { isStartFocusTool, parseStartFocusResult, type RubyStartFocusIntent } from './rubyFocusTools';
 
 const TRANSCRIBE_MODEL = process.env.OPENAI_TRANSCRIBE_MODEL || 'whisper-1';
 const CHAT_MODEL = process.env.OPENAI_CHAT_MODEL || 'gpt-4o-mini';
@@ -98,7 +99,7 @@ Today's classes (get_todays_classes):
 App navigation (navigate_to):
 - You CAN navigate the UniFlow app using navigate_to. NEVER say you cannot access settings, plans, courses, or other screens.
 - Use navigate_to for tabs: home, plans, courses, settings, chatbot, weekly_schedule, analytics, profile.
-- To open a specific plan or course: call list_plans or list_courses first to resolve the id, then navigate_to with screen=plan or screen=course.
+- To open a specific plan, course, or note: call list_plans, list_courses, or list_course_files first to resolve the id, then navigate_to with screen=plan, screen=course, or screen=note.
 - Do not use navigate_to for content questions — use get_day_overview, list_plans, get_weekly_schedule, etc.
 
 Plans, courses, and schedule:
@@ -106,6 +107,19 @@ Plans, courses, and schedule:
 - Use get_weekly_schedule and update_weekly_schedule for the weekly class grid (server is source of truth).
 - Always call tools before claiming an action succeeded. Never invent ids — list first, then act.
 - For destructive actions (delete_plan, delete_task, delete_event), confirm once if the user was not explicit.
+
+Exam / test prep (propose_exam_prep + confirm_exam_prep):
+- When the user mentions an upcoming test or exam, use propose_exam_prep once you have subject and test date. Ask ONE short question if either is missing.
+- Summarize the proposal briefly and ask exactly one yes/no confirmation before confirm_exam_prep.
+- If they decline, call confirm_exam_prep with confirmed:false.
+- On confirm, call confirm_exam_prep with confirmed:true. If they also want to study now, set startFocusNow:true (requires a course file — use list_course_files if needed).
+- Do not manually chain create_course, create_plan, create_task, and create_event for the same exam prep intent.
+
+Focus sessions (start_focus_session):
+- Use start_focus_session when the user wants to enter study focus mode on a course note/PDF now.
+- Call list_courses then list_course_files to resolve the note if course or file name is unclear.
+- Default duration 25 minutes, technique pomodoro, DND on.
+- start_focus_session opens the note and starts the in-app focus timer (client-side).
 
 Keep spoken replies brief and natural.`;
 }
@@ -206,10 +220,11 @@ const RUBY_TOOLS: ChatCompletionTool[] = [
         properties: {
           screen: {
             type: 'string',
-            enum: ['home', 'plans', 'courses', 'settings', 'chatbot', 'weekly_schedule', 'analytics', 'profile', 'plan', 'course'],
+            enum: ['home', 'plans', 'courses', 'settings', 'chatbot', 'weekly_schedule', 'analytics', 'profile', 'plan', 'course', 'note'],
           },
           planId: { type: 'string', description: 'Required when screen is plan' },
           courseId: { type: 'string', description: 'Required when screen is course' },
+          noteId: { type: 'string', description: 'Required when screen is note (course file id)' },
         },
         required: ['screen'],
       },
@@ -346,6 +361,77 @@ const RUBY_TOOLS: ChatCompletionTool[] = [
       parameters: { type: 'object', properties: { eventId: { type: 'string' } }, required: ['eventId'] },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'list_course_files',
+      description: 'List PDF/files for a course. Use before start_focus_session to pick a note.',
+      parameters: {
+        type: 'object',
+        properties: { courseId: { type: 'string' } },
+        required: ['courseId'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'start_focus_session',
+      description:
+        'Start an in-app focus/study session on a course note. Opens the note and starts the focus timer on the client.',
+      parameters: {
+        type: 'object',
+        properties: {
+          courseId: { type: 'string', description: 'Course id (or use subject)' },
+          subject: { type: 'string', description: 'Course code or name to resolve course' },
+          noteId: { type: 'string', description: 'Course file id (from list_course_files)' },
+          fileName: { type: 'string', description: 'Partial file name match if noteId unknown' },
+          durationMinutes: { type: 'number', description: 'Default 25' },
+          technique: { type: 'string', enum: ['pomodoro', 'active_recall', 'study_your_way'] },
+          dndEnabled: { type: 'boolean', description: 'Default true' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'propose_exam_prep',
+      description:
+        'Propose exam prep bundle: course, test event, plan, review tasks, and optional focus session tasks. Does NOT write to DB until confirm_exam_prep.',
+      parameters: {
+        type: 'object',
+        properties: {
+          subject: { type: 'string', description: 'Course code or name' },
+          testDate: { type: 'string', description: 'YYYY-MM-DD' },
+          testTime: { type: 'string', description: 'Default 09:00' },
+          courseName: { type: 'string' },
+          includeFocusSessions: { type: 'boolean', description: 'Default true' },
+          focusDurationMinutes: { type: 'number', description: 'Default 25' },
+        },
+        required: ['subject', 'testDate'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'confirm_exam_prep',
+      description: 'Execute or cancel pending exam prep from propose_exam_prep.',
+      parameters: {
+        type: 'object',
+        properties: {
+          confirmed: { type: 'boolean' },
+          startFocusNow: { type: 'boolean', description: 'Also start focus on a course note now' },
+          noteId: { type: 'string' },
+          fileName: { type: 'string' },
+          focusDurationMinutes: { type: 'number' },
+          technique: { type: 'string', enum: ['pomodoro', 'active_recall', 'study_your_way'] },
+        },
+        required: ['confirmed'],
+      },
+    },
+  },
 ];
 
 export interface RubyVoiceTurnResult {
@@ -363,6 +449,7 @@ export interface RubyVoiceStreamCallbacks {
   onAssistantSentenceAudio?: (audioBase64: string, audioMimeType: string, sentence: string) => void;
   onMutations?: (mutations: ToolMutationFlags) => void;
   onNavigate?: (intent: RubyNavigateIntent) => void;
+  onStartFocusSession?: (intent: RubyStartFocusIntent) => void;
   onToolStarted?: (name: string) => void;
   onToolCompleted?: (name: string) => void;
 }
@@ -392,6 +479,7 @@ export async function runRubyToolPhase(params: {
   onToolCompleted?: (name: string) => void;
   onMutations?: (mutations: ToolMutationFlags) => void;
   onNavigate?: (intent: RubyNavigateIntent) => void;
+  onStartFocusSession?: (intent: RubyStartFocusIntent) => void;
 }): Promise<RubyToolPhaseResult> {
   const client = getClient();
   const { session } = params;
@@ -448,6 +536,10 @@ export async function runRubyToolPhase(params: {
         if (isNavigateTool(fn.name)) {
           const intent = parseNavigateResult(content);
           if (intent) params.onNavigate?.(intent);
+        }
+        if (isStartFocusTool(fn.name) || fn.name === 'confirm_exam_prep') {
+          const focusIntent = parseStartFocusResult(content);
+          if (focusIntent) params.onStartFocusSession?.(focusIntent);
         }
         emitMutationsIfNeeded();
         toolMsgs.push({
@@ -572,6 +664,7 @@ export async function runRubyVoiceTurnStream(params: {
     onToolCompleted: params.callbacks?.onToolCompleted,
     onMutations: params.callbacks?.onMutations,
     onNavigate: params.callbacks?.onNavigate,
+    onStartFocusSession: params.callbacks?.onStartFocusSession,
   });
 
   if (params.signal?.aborted) {

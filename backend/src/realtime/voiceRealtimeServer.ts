@@ -157,6 +157,17 @@ export function setupVoiceRealtimeServer(server: HttpServer): void {
               if (closed || turnAbort?.signal.aborted) return;
               sendJson(clientWs, { type: 'app.navigate', path: intent.path, mode: intent.mode });
             },
+            onStartFocusSession: (focus) => {
+              if (closed || turnAbort?.signal.aborted) return;
+              sendJson(clientWs, {
+                type: 'app.start_focus_session',
+                noteId: focus.noteId,
+                courseId: focus.courseId,
+                durationMinutes: focus.durationMinutes,
+                technique: focus.technique,
+                dndEnabled: focus.dndEnabled,
+              });
+            },
             onAssistantDelta: (delta) => {
               if (closed || turnAbort?.signal.aborted) return;
               runningAssistantText += delta;

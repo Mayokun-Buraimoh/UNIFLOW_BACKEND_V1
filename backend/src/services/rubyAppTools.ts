@@ -1,4 +1,5 @@
 import { Course } from '../models/Course';
+import CourseFile from '../models/CourseFile';
 import { Event } from '../models/Event';
 import { Task } from '../models/Task';
 import { WeeklySchedule } from '../models/WeeklySchedule';
@@ -32,7 +33,7 @@ export function resolveRubyTabScreen(
   if (!target) {
     return {
       ok: false,
-      error: `Unknown screen: ${screen}. Use home, plans, courses, settings, chatbot, weekly_schedule, analytics, profile, plan, or course.`,
+      error: `Unknown screen: ${screen}. Use home, plans, courses, settings, chatbot, weekly_schedule, analytics, profile, plan, course, or note.`,
     };
   }
   return { ok: true, path: target.path, mode: target.mode };
@@ -40,9 +41,16 @@ export function resolveRubyTabScreen(
 
 export async function rubyNavigateTo(
   userId: string,
-  input: { screen: string; planId?: string; courseId?: string }
+  input: { screen: string; planId?: string; courseId?: string; noteId?: string }
 ): Promise<{ ok: boolean; path?: string; mode?: 'root' | 'forward'; error?: string }> {
   const screen = (input.screen || '').trim().toLowerCase();
+  if (screen === 'note') {
+    const noteId = (input.noteId || '').trim();
+    if (!noteId) return { ok: false, error: 'noteId is required when screen is note' };
+    const file = await CourseFile.findOne({ where: { id: noteId, userId } });
+    if (!file) return { ok: false, error: 'Note file not found' };
+    return { ok: true, path: `/note/${noteId}`, mode: 'root' };
+  }
   if (screen === 'plan') {
     const planId = (input.planId || '').trim();
     if (!planId) return { ok: false, error: 'planId is required when screen is plan' };

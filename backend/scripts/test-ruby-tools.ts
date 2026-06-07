@@ -3,6 +3,7 @@
  * Run: npx ts-node scripts/test-ruby-tools.ts
  */
 import assert from 'assert';
+import { buildReviewDueDates } from '../src/services/examPrepService';
 import { calculatePlanProgress } from '../src/services/planService';
 import { parseNavigateResult, resolveRubyTabScreen } from '../src/services/rubyAppTools';
 
@@ -54,7 +55,18 @@ function testCalculatePlanProgress() {
   );
 }
 
+function testBuildReviewDueDates() {
+  assert.deepStrictEqual(buildReviewDueDates('2026-06-08', '2026-06-02'), [
+    '2026-06-05',
+    '2026-06-06',
+    '2026-06-07',
+  ]);
+  assert.deepStrictEqual(buildReviewDueDates('2026-06-08', '2026-06-07'), ['2026-06-07']);
+  assert.deepStrictEqual(buildReviewDueDates('2026-06-07', '2026-06-08'), []);
+}
+
 testResolveRubyTabScreen();
 testParseNavigateResult();
 testCalculatePlanProgress();
+testBuildReviewDueDates();
 console.log('ruby tools unit checks passed');
