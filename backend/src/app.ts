@@ -61,9 +61,22 @@ app.use('/api/push-tokens', pushTokenRoutes);
 app.use('/api/internal', internalRoutes);
 app.use('/api/voice', voiceRoutes);
 
-// Health check endpoint
+// Track database readiness for health checks
+let dbReady = false;
+
+// Health check endpoint — responds 200 even before DB is connected so Cloud Run
+// startup probes succeed, but includes DB status for observability.
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'OK', message: 'UniFlow Backend is running' });
+  res.json({
+    status: 'OK',
+    message: 'UniFlow Backend is running',
+    database: dbReady ? 'connected' : 'connecting',
+  });
+});
+
+// Root health check — Cloud Run sometimes probes "/" by default
+app.get('/', (req, res) => {
+  res.json({ status: 'OK' });
 });
 
 // 404 handler (must come before error handler)
@@ -125,12 +138,12 @@ process.on('uncaughtException', (error: Error) => {
   console.error('Stack:', error.stack);
 });
 
-// Database connection and server start
-async function startServer() {
+// Database connection (called after server is already listening)
+async function connectDatabase() {
   try {
     await sequelize.authenticate();
     console.log('Database connection has been established successfully.');
-    
+
     // Create missing tables only. Avoid `alter: true` by default — it can fail on shared DBs
     // (e.g. Sequelize tries to drop FK constraints that were renamed or never existed).
     // To force schema-alter sync: SEQUELIZE_SYNC_ALTER=true npm run dev
@@ -138,20 +151,32 @@ async function startServer() {
       process.env.SEQUELIZE_SYNC_ALTER === 'true' || process.env.SEQUELIZE_SYNC_ALTER === '1';
     await sequelize.sync({ alter: syncAlter });
     console.log(`Database synchronized successfully (alter=${syncAlter}).`);
-    
-    const httpServer = createServer(app);
-    setupVoiceRealtimeServer(httpServer);
-    httpServer.listen(PORT, () => {
-      console.log(`UniFlow Backend server is running on port ${PORT}`);
-      console.log(`Health check: http://localhost:${PORT}/api/health`);
-      console.log(`Realtime voice WS: ws://localhost:${PORT}/api/voice/realtime`);
-    });
+    dbReady = true;
   } catch (error) {
-    console.error('Unable to start server:', error);
-    // Only exit if we can't start the server
-    // For runtime errors, we want to keep the server running
-    process.exit(1);
+    console.error('Unable to connect to database:', error);
+    // Don't exit — the server is already listening and can serve health checks.
+    // Cloud Run will keep the container alive. Requests that need the DB will
+    // fail with 500s, but the container won't be killed by the startup probe.
+    console.error('The server is running but database operations will fail.');
   }
+}
+
+// Start server: listen FIRST, then connect to DB.
+// Cloud Run requires the container to accept connections on PORT within the
+// startup timeout. If we waited for the DB before listening, a slow or
+// unreachable DB would cause the container to be killed.
+async function startServer() {
+  const httpServer = createServer(app);
+  setupVoiceRealtimeServer(httpServer);
+
+  httpServer.listen(PORT, () => {
+    console.log(`UniFlow Backend server is running on port ${PORT}`);
+    console.log(`Health check: http://localhost:${PORT}/api/health`);
+    console.log(`Realtime voice WS: ws://localhost:${PORT}/api/voice/realtime`);
+  });
+
+  // Connect to DB after the port is open
+  await connectDatabase();
 }
 
 // Handle promise rejections from startServer
