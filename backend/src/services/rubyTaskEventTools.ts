@@ -540,6 +540,9 @@ export async function executeRubyTool(
       case 'get_todays_classes': {
         return JSON.stringify(await rubyGetTodaysClasses(session));
       }
+      case 'control_spotify': {
+        return JSON.stringify(args);
+      }
       case 'navigate_to':
       case 'navigate_app': {
         return JSON.stringify(

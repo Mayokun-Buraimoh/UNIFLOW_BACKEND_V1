@@ -200,6 +200,23 @@ const RUBY_TOOLS: ChatCompletionTool[] = [
   {
     type: 'function',
     function: {
+      name: 'control_spotify',
+      description:
+        'Control local Spotify playback via AppleScript on the Mac. Use this when the user asks to play focus music or adjust the volume. Supported styles: deepFocus, lofiBeats, peacefulPiano, brainFood, likedSongs.',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['playPreset', 'togglePlayPause', 'nextTrack', 'previousTrack', 'setVolume'] },
+          preset: { type: 'string', enum: ['deepFocus', 'lofiBeats', 'peacefulPiano', 'brainFood', 'likedSongs'] },
+          volume: { type: 'number', description: 'Volume level from 0 to 100' }
+        },
+        required: ['action']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
       name: 'get_todays_classes',
       description:
         "Return the user's classes for today from their weekly schedule in the database. Use for questions about today's lectures/classes.",
@@ -444,12 +461,19 @@ export interface RubyVoiceTurnResult {
   debug?: { toolRounds: number };
 }
 
+export interface RubyControlSpotifyIntent {
+  action: string;
+  preset?: string;
+  volume?: number;
+}
+
 export interface RubyVoiceStreamCallbacks {
   onAssistantDelta?: (delta: string) => void;
   onAssistantSentenceAudio?: (audioBase64: string, audioMimeType: string, sentence: string) => void;
   onMutations?: (mutations: ToolMutationFlags) => void;
   onNavigate?: (intent: RubyNavigateIntent) => void;
   onStartFocusSession?: (intent: RubyStartFocusIntent) => void;
+  onControlSpotify?: (intent: RubyControlSpotifyIntent) => void;
   onToolStarted?: (name: string) => void;
   onToolCompleted?: (name: string) => void;
 }
@@ -480,6 +504,7 @@ export async function runRubyToolPhase(params: {
   onMutations?: (mutations: ToolMutationFlags) => void;
   onNavigate?: (intent: RubyNavigateIntent) => void;
   onStartFocusSession?: (intent: RubyStartFocusIntent) => void;
+  onControlSpotify?: (intent: RubyControlSpotifyIntent) => void;
 }): Promise<RubyToolPhaseResult> {
   const client = getClient();
   const { session } = params;
@@ -540,6 +565,14 @@ export async function runRubyToolPhase(params: {
         if (isStartFocusTool(fn.name) || fn.name === 'confirm_exam_prep') {
           const focusIntent = parseStartFocusResult(content);
           if (focusIntent) params.onStartFocusSession?.(focusIntent);
+        }
+        if (fn.name === 'control_spotify') {
+          try {
+            const spotifyIntent = JSON.parse(content) as RubyControlSpotifyIntent;
+            if (spotifyIntent.action) {
+              params.onControlSpotify?.(spotifyIntent);
+            }
+          } catch {}
         }
         emitMutationsIfNeeded();
         toolMsgs.push({

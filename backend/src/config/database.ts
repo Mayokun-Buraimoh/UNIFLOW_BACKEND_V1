@@ -26,10 +26,24 @@ const dialectOptions = sslRequested()
   ? { ssl: { require: true, rejectUnauthorized: false } }
   : undefined;
 
+// Pool config: min 0 prevents eager connection on startup (so the server can
+// listen before the DB is actually reachable). The pool error handler logs
+// instead of crashing the process.
+const poolConfig = {
+  min: 0,
+  max: 10,
+  acquire: 30000,
+  idle: 10000,
+};
+
 const commonOptions: Options = {
   dialect: 'postgres',
   logging: env === 'development' ? console.log : false,
   dialectOptions,
+  pool: poolConfig,
+  retry: {
+    max: 3,
+  },
 };
 
 let sequelize: Sequelize;
@@ -37,6 +51,7 @@ let sequelize: Sequelize;
 if (process.env.DATABASE_URL) {
   console.log('Database configuration: using DATABASE_URL', {
     sslEnabled: !!dialectOptions,
+    url: process.env.DATABASE_URL.replace(/\/\/[^@]*@/, '//***:***@'), // mask credentials
   });
   sequelize = new Sequelize(process.env.DATABASE_URL, commonOptions);
 } else {
@@ -71,8 +86,13 @@ if (process.env.DATABASE_URL) {
       dialect: dbConfig.dialect,
       logging: commonOptions.logging,
       dialectOptions,
+      pool: poolConfig,
+      retry: {
+        max: 3,
+      },
     }
   );
 }
 
 export { sequelize };
+

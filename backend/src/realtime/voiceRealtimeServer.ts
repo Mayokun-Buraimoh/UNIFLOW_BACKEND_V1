@@ -168,6 +168,15 @@ export function setupVoiceRealtimeServer(server: HttpServer): void {
                 dndEnabled: focus.dndEnabled,
               });
             },
+            onControlSpotify: (intent) => {
+              if (closed || turnAbort?.signal.aborted) return;
+              sendJson(clientWs, {
+                type: 'app.control_spotify',
+                action: intent.action,
+                preset: intent.preset,
+                volume: intent.volume,
+              });
+            },
             onAssistantDelta: (delta) => {
               if (closed || turnAbort?.signal.aborted) return;
               runningAssistantText += delta;

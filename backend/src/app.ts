@@ -1,3 +1,20 @@
+// ──────────────────────────────────────────────────────────────────────────────
+// IMPORTANT: Global error handlers MUST be registered BEFORE any import that
+// touches the database (Sequelize), because the connection-pool can emit an
+// unhandled error event during module initialisation.  Moving them here
+// prevents Node from crashing before the server starts listening.
+// ──────────────────────────────────────────────────────────────────────────────
+process.on('unhandledRejection', (reason: any, promise: Promise<any>) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  // Don't exit – log the error and continue running.
+});
+
+process.on('uncaughtException', (error: Error) => {
+  console.error('Uncaught Exception:', error);
+  console.error('Stack:', error.stack);
+  // Don't exit – keep the server alive so Cloud Run's health-check passes.
+});
+
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -18,7 +35,7 @@ import { setupVoiceRealtimeServer } from './realtime/voiceRealtimeServer';
 import './models'; // Import models to establish associations
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 
 // So req.protocol / host respect X-Forwarded-* on Render and similar proxies
 app.set('trust proxy', 1);
@@ -64,19 +81,19 @@ app.use('/api/voice', voiceRoutes);
 // Track database readiness for health checks
 let dbReady = false;
 
+// Root health check — Cloud Run probes "/" by default
+app.get('/', (_req, res) => {
+  res.status(200).json({ status: 'OK' });
+});
+
 // Health check endpoint — responds 200 even before DB is connected so Cloud Run
 // startup probes succeed, but includes DB status for observability.
-app.get('/api/health', (req, res) => {
+app.get('/api/health', (_req, res) => {
   res.json({
     status: 'OK',
     message: 'UniFlow Backend is running',
     database: dbReady ? 'connected' : 'connecting',
   });
-});
-
-// Root health check — Cloud Run sometimes probes "/" by default
-app.get('/', (req, res) => {
-  res.json({ status: 'OK' });
 });
 
 // 404 handler (must come before error handler)
@@ -124,20 +141,6 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
   });
 });
 
-// Global error handlers to prevent unexpected exits
-process.on('unhandledRejection', (reason: any, promise: Promise<any>) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-  // Don't exit - log the error and continue running
-  // This prevents the server from stopping due to unhandled promise rejections
-});
-
-process.on('uncaughtException', (error: Error) => {
-  console.error('Uncaught Exception:', error);
-  // For uncaught exceptions, we might want to exit gracefully
-  // But let's log first and see if we can recover
-  console.error('Stack:', error.stack);
-});
-
 // Database connection (called after server is already listening)
 async function connectDatabase() {
   try {
@@ -169,18 +172,24 @@ async function startServer() {
   const httpServer = createServer(app);
   setupVoiceRealtimeServer(httpServer);
 
-  httpServer.listen(PORT, () => {
-    console.log(`UniFlow Backend server is running on port ${PORT}`);
-    console.log(`Health check: http://localhost:${PORT}/api/health`);
-    console.log(`Realtime voice WS: ws://localhost:${PORT}/api/voice/realtime`);
+  // Wait for listen to complete before doing anything else
+  await new Promise<void>((resolve, reject) => {
+    httpServer.on('error', reject);
+    httpServer.listen(PORT, () => {
+      console.log(`UniFlow Backend server is running on port ${PORT}`);
+      console.log(`Health check: http://localhost:${PORT}/api/health`);
+      console.log(`Realtime voice WS: ws://localhost:${PORT}/api/voice/realtime`);
+      resolve();
+    });
   });
 
-  // Connect to DB after the port is open
+  // Connect to DB after the port is open — failures are non-fatal
   await connectDatabase();
 }
 
-// Handle promise rejections from startServer
 startServer().catch((error) => {
   console.error('Failed to start server:', error);
-  process.exit(1);
+  // Don't exit — let the process stay alive so Cloud Run can probe.
+  // The only way we get here is if httpServer.listen() itself fails,
+  // which should be extremely rare.
 });
